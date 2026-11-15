@@ -13,8 +13,9 @@ Runs entirely in the browser — the G-CATS data never leaves the machine it is 
 
 | Screen | What it is for |
 | --- | --- |
-| **Overview** | Judgement pipeline donut, completion, error types, who you are waiting on, what needs attention next |
-| **Judgement Register** | Every case, with the evidence chain and the decision panel |
+| **Overview** | KPI cards, completion, bottleneck, error types, by-supplier breakdown, trend, and the Download Summary |
+| **Judgment Workspace** | Internal judgment: every case with its evidence chain, status, and the decision panel |
+| **Supplier Self-Check** | Everything suppliers submitted on their IMDS Material Self-Check Sheets |
 | **Daily G-CATS Update** | Import today's Error Check Log; answers and decisions already made are kept |
 | **Auto-Judgement History** | Append-only log of every answer, approval, override and re-open |
 | **Supplier Follow-up** | Open questions grouped per supplier |
@@ -71,6 +72,33 @@ Open `public/index.html` in a browser. That is all — there is no build step.
      comment, any override justification, who decided, their role and when. Status is a solid fill:
      green OK, red NG, amber needs input, violet human review.
    - **Printable summary** (PDF via your browser) and **CSV**.
+
+### Internal judgment statuses
+
+A case carries one status, in this order of precedence:
+
+| Status | Set by | Meaning |
+| --- | --- | --- |
+| **OK / NG** | Approver, or the WARP rule | A final judgement is recorded, with comment, reviewer and date |
+| **⚠️ Need confirmation to supplier** | Any reviewer | Parked until the supplier answers; the reason is recorded |
+| **Working** | Any reviewer | Taken for internal judgment, with the reviewer's name |
+| Needs input / Recommend OK / Recommend NG / Human review | The engine | Where the Appendix II flow stopped |
+
+A final NG also carries an **IMDS reject comment**, kept separately from the internal comment.
+
+### WARP part number auto-judgment
+
+A WARP part-number case is judged **OK automatically** when all of the following hold:
+
+1. the supplier code is present and registered in the Purchasing supplier code master;
+2. the company name matches that master entry *(switchable)*;
+3. the Appendix II flow itself also reaches OK *(switchable)*.
+
+The master is Purchasing's own registration, so a code found in it counts as confirmed by
+Purchasing. A missing or unregistered supplier code is **never** auto-judged — it stays pending for
+internal judgment, as does any case the flow cannot settle. Auto-judged rows are marked
+**Auto Judged**, carry a timestamp and the reason, and an existing manual judgement is never
+overwritten. Every case shows why it did or did not qualify.
 
 ### Destination codes
 

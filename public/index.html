@@ -222,10 +222,11 @@ button.pill:hover{background:var(--violet-bg);color:var(--violet)}
   <div class="sec">Home</div>
   <button class="nav" data-v="overview"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/></svg><span>Overview</span></button>
   <div class="sec">Work</div>
-  <button class="nav" data-v="register"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 9l2 2 4-4M8 16h8"/></svg><span>Judgement Register</span><small id="n-todo">0</small></button>
+  <button class="nav" data-v="register"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 9l2 2 4-4M8 16h8"/></svg><span>Judgment Workspace</span><small id="n-todo">0</small></button>
   <button class="nav" data-v="import"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 15v3a3 3 0 003 3h10a3 3 0 003-3v-3"/></svg><span>Daily G-CATS Update</span></button>
   <button class="nav" data-v="history"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Auto-Judgement History</span></button>
   <div class="sec">Supplier</div>
+  <button class="nav" data-v="selfcheck"><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M8 12l2 2 4-4M8 17h8"/></svg><span>Supplier Self-Check</span><small id="n-self">0</small></button>
   <button class="nav" data-v="supplier"><svg viewBox="0 0 24 24"><path d="M3 7h11v9H3zM14 10h4l3 3v3h-7"/><circle cx="7" cy="18" r="1.8"/><circle cx="17" cy="18" r="1.8"/></svg><span>Supplier Follow-up</span><small id="n-sup">0</small></button>
   <div class="sec">Reference</div>
   <button class="nav" data-v="refs"><svg viewBox="0 0 24 24"><path d="M5 4h10a3 3 0 013 3v13H8a3 3 0 01-3-3zM5 17a3 3 0 013-3h10"/></svg><span>Substance References</span></button>
@@ -1074,8 +1075,17 @@ const refs = new IMDS.References(REFS);
 const engine = new IMDS.JudgementEngine(refs, undefined, { judgementDate: today });
 const STORE = "imds-auto-judgement-v1";
 
-let S = { records: [], answers: {}, partAnswers: {}, approvals: {}, audit: [], imports: [] };
+let S = { records: [], answers: {}, partAnswers: {}, approvals: {}, audit: [], imports: [], flags: {}, settings: {} };
 try { const raw = localStorage.getItem(STORE); if (raw) S = Object.assign(S, JSON.parse(raw)); } catch (e) {}
+S.flags = S.flags || {}; S.settings = S.settings || {}; S.selfChecks = S.selfChecks || [];
+/** WARP part-number auto-judgment rule. Editable in Settings; stored with the data. */
+const RULE_DEFAULTS = { warpAuto: true, warpRequireName: true, warpRequireEngineOk: true };
+function rule(k) { return S.settings[k] === undefined ? RULE_DEFAULTS[k] : S.settings[k]; }
+function setRule(k, v) {
+  S.settings[k] = v;
+  S.audit.push({ at: new Date().toISOString(), ...user(), action: "RULE_CHANGE", detail: `${k} = ${v}` });
+  save(); applyAutoJudgement(); evaluateAll(); render();
+}
 let UI = { view: "overview", sel: null, cat: "All", status: "", route: "", q: "", decision: null, applyGroup: true };
 let ITEMS = [], GROUP_OF = new Map();
 
@@ -1118,14 +1128,105 @@ function evaluateAll() {
   GROUP_OF = new Map();
   for (const g of IMDS.groupIdentical(ITEMS.filter((i) => !S.approvals[i.key]))) for (const it of g) GROUP_OF.set(it.key, g);
 }
+/** Re-evaluate, then let the WARP rule judge anything that now qualifies. */
+function evaluateAndAutoJudge() {
+  evaluateAll();
+  if (applyAutoJudgement()) evaluateAll();
+}
 function finalOf(it) { return S.approvals[it.key]; }
+function flagOf(it) { return S.flags[it.key]; }
+/** Internal workflow states a reviewer sets, separate from the engine's own status. */
+const FLAG_WORKING = "WORKING", FLAG_SUPPLIER = "NEED_SUPPLIER";
+function setFlag(it, status, comment) {
+  const u = user();
+  if (status === null) { delete S.flags[it.key]; S.audit.push({ at: new Date().toISOString(), ...u, action: "CLEAR_STATUS", recordKey: it.key, part: it.record.deliveryPartNo }); }
+  else {
+    S.flags[it.key] = { status, user: u.user, role: u.role, at: new Date().toISOString(), comment: comment || "", part: it.record.deliveryPartNo, supplierCode: it.record.supplierCode };
+    S.audit.push({ at: new Date().toISOString(), ...u, action: status === FLAG_WORKING ? "TAKEN" : "NEED_SUPPLIER", recordKey: it.key, part: it.record.deliveryPartNo, detail: comment || "" });
+  }
+  save(); evaluateAll(); render();
+}
 function statusTag(it) {
-  const f = finalOf(it); if (f) return `<span class="tag t-fin">FINAL ${f.newStatus === "FINAL_OK" ? "OK" : "NG"}</span>`;
+  const f = finalOf(it);
+  if (f) return `<span class="tag ${f.newStatus === "FINAL_OK" ? "t-ok" : "t-ng"}">${f.newStatus === "FINAL_OK" ? "OK" : "NG"}</span>${f.judgmentType === "Auto Judged" ? ` <span class="tag t-route" title="Judged automatically by the WARP part-number rule">Auto</span>` : ""}`;
+  const fl = flagOf(it);
+  if (fl && fl.status === FLAG_SUPPLIER) return `<span class="tag t-wait">⚠️ Need confirmation</span>`;
+  if (fl && fl.status === FLAG_WORKING) return `<span class="tag t-rev">Working</span>`;
   const e = it.evaluation;
   return { RECOMMEND_OK: '<span class="tag t-ok">Recommend OK</span>', RECOMMEND_NG: '<span class="tag t-ng">Recommend NG</span>',
            AWAITING_INPUT: '<span class="tag t-wait">Needs input</span>', NEED_HUMAN_REVIEW: '<span class="tag t-rev">Human review</span>' }[e.status];
 }
-function statusKey(it) { return finalOf(it) ? "FINAL" : it.evaluation.status; }
+/** One status per case, in precedence order: a final decision, then a reviewer's
+ *  internal state, then whatever the engine concluded on its own. */
+function statusKey(it) {
+  const f = finalOf(it);
+  if (f) return f.newStatus === "FINAL_OK" ? "OK" : "NG";
+  const fl = flagOf(it);
+  if (fl) return fl.status;
+  return it.evaluation.status;
+}
+const WORKSPACE_STATUSES = [
+  ["OK", "OK"], ["NG", "NG"], ["NEED_SUPPLIER", "⚠️ Need confirmation to supplier"], ["WORKING", "Working (under internal judgment)"],
+  ["AWAITING_INPUT", "Needs input"], ["RECOMMEND_OK", "Recommend OK"], ["RECOMMEND_NG", "Recommend NG"], ["NEED_HUMAN_REVIEW", "Human review"],
+];
+/** Pending internal judgment = anything a person still has to act on inside the company. */
+function isPendingInternal(it) {
+  const k = statusKey(it);
+  return k === "WORKING" || k === "AWAITING_INPUT" || k === "RECOMMEND_OK" || k === "RECOMMEND_NG" || k === "NEED_HUMAN_REVIEW";
+}
+
+// ---------------- WARP part number: automatic judgement ----------------
+/** Why this case does or does not qualify for an automatic OK.
+ *  Returns {ok:true} only when every configured condition is met. */
+function warpAutoCheck(it) {
+  const r = it.record;
+  if (!/warp/i.test(r.errorType || "")) return { ok: false, why: "Not a WARP part number error" };
+  if (!r.supplierCode) return { ok: false, ng: true, why: "No supplier code on the record" };
+  const hit = refs.supplierByCode(r.supplierCode);
+  if (!hit) return { ok: false, ng: true, why: `Supplier code ${r.supplierCode} is not in the Purchasing supplier code master` };
+  if (rule("warpRequireName")) {
+    const a = IMDS.References.companyKey(r.companyName), b = hit.nameKey;
+    const same = !!a && (a === b || a.startsWith(b) || b.startsWith(a));
+    if (!same) return { ok: false, why: `Company name "${r.companyName || "?"}" does not match the master entry "${hit.name}"` };
+  }
+  // The Purchasing supplier code master is Purchasing's own registration, so a code found
+  // in it counts as confirmed. The separate Purchasing question only arises when the code
+  // is missing from the master, which already fails above.
+  if (rule("warpRequireEngineOk") && it.evaluation.recommendedJudge !== "OK") {
+    const st = it.evaluation.status === "AWAITING_INPUT" ? "is still waiting on an answer" : it.evaluation.status === "NEED_HUMAN_REVIEW" ? "needs human review" : `recommends ${it.evaluation.recommendedJudge || "nothing yet"}`;
+    return { ok: false, why: `The Appendix II flow ${st}, so the rule holds off` };
+  }
+  const ans = answersFor(r);
+  const pk = Object.keys(ans).find((k) => k.startsWith("purchasing:"));
+  const extra = pk ? (ans[pk] === "yes" ? ", and Purchasing confirmed it" : "") : "";
+  return { ok: true, why: `Supplier code ${r.supplierCode} is registered in the Purchasing master as "${hit.name}"${extra}` };
+}
+/** Apply the rule across the register. Never touches a case that already has a
+ *  judgement — manual decisions are not overwritten. */
+function applyAutoJudgement() {
+  if (!rule("warpAuto")) return 0;
+  let n = 0;
+  for (const it of ITEMS) {
+    if (S.approvals[it.key]) continue;              // already judged, manual or auto
+    const c = warpAutoCheck(it);
+    if (!c.ok) continue;
+    const at = new Date().toISOString();
+    const entry = {
+      recordKey: it.key, at, user: "WARP auto-judgement rule", role: "System", action: "AUTO_JUDGE",
+      previousStatus: it.evaluation.status, newStatus: "FINAL_OK", aiRecommendation: it.evaluation.recommendedJudge,
+      aiTimestamp: it.evaluation.evaluatedAt, comment: c.why, judgmentType: "Auto Judged",
+      flowId: it.evaluation.flowId, flowVersion: it.evaluation.flowVersion, referenceVersions: it.evaluation.referenceVersions,
+      part: it.record.deliveryPartNo, errorCategory: it.evaluation.errorCategory, supplierCode: it.record.supplierCode,
+      evaluationSnapshot: { trace: it.evaluation.trace, substanceChain: it.evaluation.substanceChain },
+    };
+    S.approvals[it.key] = entry;
+    S.audit.push({ ...entry });
+    delete S.flags[it.key];
+    n++;
+  }
+  if (n) save();
+  return n;
+}
 
 // ---------------- views ----------------
 function render() {
@@ -1133,8 +1234,9 @@ function render() {
   const open = ITEMS.filter((i) => !finalOf(i));
   $("#n-todo").textContent = open.length;
   { const rl = user().role, can = rl !== "Internal Reviewer"; $("#rolehint").textContent = can ? "✓ Can confirm final OK / NG" : "Recommend only · switch to Approver to confirm"; }
+  const nSelf = $("#n-self"); if (nSelf) nSelf.textContent = selfCheckRows().length;
   $("#n-sup").textContent = open.filter((i) => i.evaluation.routeTo === "Supplier").length;
-  ({ overview: viewOverview, register: viewRegister, import: viewImport, history: viewHistory, supplier: viewSupplier, refs: viewRefs, rules: viewRules })[UI.view]();
+  ({ overview: viewOverview, register: viewRegister, import: viewImport, history: viewHistory, supplier: viewSupplier, selfcheck: viewSelfCheck, refs: viewRefs, rules: viewRules })[UI.view]();
 }
 
 function header(crumb, title, sub) {
@@ -1149,15 +1251,18 @@ function filtered() {
   return ITEMS.filter((it) => {
     const r = it.record, e = it.evaluation;
     if (UI.cat !== "All" && e.errorCategory !== UI.cat) return false;
+    if (UI.pendingOnly && !isPendingInternal(it)) return false;
     if (UI.status && statusKey(it) !== UI.status) return false;
     if (UI.route && (finalOf(it) || e.routeTo !== UI.route)) return false;
-    if (q && ![r.deliveryPartNo, r.supplierCode, r.companyName, r.cas, r.substanceName, r.materialName, e.errorCategory, r.deliveryPartName].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
+    const f = finalOf(it), fl = flagOf(it);
+    if (q && ![r.deliveryPartNo, r.supplierCode, r.companyName, r.cas, r.substanceName, r.materialName, e.errorCategory, r.deliveryPartName,
+               f && f.user, f && f.comment, f && f.imdsReject, fl && fl.user, fl && fl.comment].some((v) => String(v ?? "").toLowerCase().includes(q))) return false;
     return true;
   });
 }
 
 
-const STATUS_LABEL = { AWAITING_INPUT: "Needs input", RECOMMEND_OK: "Recommend OK", RECOMMEND_NG: "Recommend NG", NEED_HUMAN_REVIEW: "Human review", FINAL: "Final (approved)" };
+const STATUS_LABEL = { OK: "OK", NG: "NG", NEED_SUPPLIER: "\u26a0\ufe0f Need confirmation to supplier", WORKING: "Working (under internal judgment)", AWAITING_INPUT: "Needs input", RECOMMEND_OK: "Recommend OK", RECOMMEND_NG: "Recommend NG", NEED_HUMAN_REVIEW: "Human review", FINAL: "Final (approved)" };
 async function saveFile(name, data, mime) {
   const blob = data instanceof Blob ? data : new Blob([data], { type: mime });
   try {
@@ -1171,61 +1276,206 @@ document.addEventListener("mouseover", (e) => { const t = e.target.closest && e.
 document.addEventListener("mousemove", (e) => { tip.style.left = Math.min(e.clientX + 14, innerWidth - 310) + "px"; tip.style.top = e.clientY + 16 + "px"; });
 const ICO = { out: '<svg viewBox="0 0 24 24"><path d="M7 17L17 7M9 7h8v8"/></svg>', inn: '<svg viewBox="0 0 24 24"><path d="M17 7L7 17M15 17H7V9"/></svg>', up: '<svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 15v3a3 3 0 003 3h10a3 3 0 003-3v-3"/></svg>' };
 
-function viewOverview() {
+/** Every number on the dashboard comes from the live register — nothing is stored or hardcoded. */
+function dashboard() {
   const total = ITEMS.length;
-  if (!total) {
+  const by = (f) => ITEMS.filter(f);
+  const ok = by((i) => statusKey(i) === "OK"), ng = by((i) => statusKey(i) === "NG");
+  const needSup = by((i) => statusKey(i) === "NEED_SUPPLIER");
+  const working = by((i) => statusKey(i) === "WORKING");
+  const pending = by(isPendingInternal);
+  const awaiting = by((i) => statusKey(i) === "AWAITING_INPUT");
+  const review = by((i) => statusKey(i) === "NEED_HUMAN_REVIEW");
+  const readyToConfirm = by((i) => statusKey(i) === "RECOMMEND_OK" || statusKey(i) === "RECOMMEND_NG");
+  const judged = ok.length + ng.length;
+  const auto = Object.values(S.approvals).filter((a) => a.judgmentType === "Auto Judged").length;
+  const parts = new Set(S.records.map((r) => r.deliveryPartNo).filter(Boolean));
+  const partsWithError = new Set(ITEMS.map((i) => i.record.deliveryPartNo).filter(Boolean));
+  const routes = {}; pending.forEach((i) => { const r = statusKey(i) === "WORKING" ? "Internal" : i.evaluation.routeTo; routes[r] = (routes[r] || 0) + 1; });
+  const cats = {}; ITEMS.forEach((i) => { const c = i.evaluation.errorCategory; (cats[c] ||= { open: 0, done: 0, all: 0 }); cats[c].all++; statusKey(i) === "OK" || statusKey(i) === "NG" ? cats[c].done++ : cats[c].open++; });
+  const sup = {};
+  ITEMS.forEach((i) => {
+    const k = `${i.record.supplierCode || "—"}|${i.record.companyName || ""}`;
+    (sup[k] ||= { ok: 0, ng: 0, needSup: 0, pending: 0, all: 0 });
+    const s = statusKey(i); sup[k].all++;
+    if (s === "OK") sup[k].ok++; else if (s === "NG") sup[k].ng++; else if (s === "NEED_SUPPLIER") sup[k].needSup++; else sup[k].pending++;
+  });
+  // completion over time, from the audit trail
+  const trend = {};
+  for (const a of S.audit) if ((a.action === "APPROVE" || a.action === "OVERRIDE" || a.action === "AUTO_JUDGE") && a.at) { const d = a.at.slice(0, 10); trend[d] = (trend[d] || 0) + 1; }
+  return { total, ok, ng, needSup, working, pending, awaiting, review, readyToConfirm, judged, auto,
+           pct: total ? Math.round((judged / total) * 100) : 0, parts, partsWithError, routes, cats, sup, trend };
+}
+
+function viewOverview() {
+  const d = dashboard();
+  if (!d.total) {
     $("#main").innerHTML = header("HOME / OVERVIEW", "Overview", "Your IMDS judgement workload at a glance.") +
       `<div class="card empty"><div class="big">${ICO.up.replace("<svg", '<svg width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"')}</div><h3>No G-CATS records yet</h3><p>Import today's G-CATS Error Check Log (.xlsx) to see the dashboard, or load the July 2024 sample to explore.</p><button class="btn pri" id="go-import">Import G-CATS log</button></div>`;
     $("#go-import").onclick = () => { UI.view = "import"; render(); };
     return;
   }
-  const c = { AWAITING_INPUT: 0, NEED_HUMAN_REVIEW: 0, RECOMMEND_OK: 0, RECOMMEND_NG: 0, FINAL_OK: 0, FINAL_NG: 0 };
-  ITEMS.forEach((i) => { const f = finalOf(i); if (f) c[f.newStatus === "FINAL_OK" ? "FINAL_OK" : "FINAL_NG"]++; else c[i.evaluation.status]++; });
-  const final = c.FINAL_OK + c.FINAL_NG, open = total - final, pct = Math.round((final / total) * 100);
-  const segs = [["AWAITING_INPUT", "Needs input", "#f5a524", "AWAITING_INPUT"], ["NEED_HUMAN_REVIEW", "Human review", "#5b30d6", "NEED_HUMAN_REVIEW"], ["RECOMMEND_OK", "Recommend OK", "#5fd3b0", "RECOMMEND_OK"], ["RECOMMEND_NG", "Recommend NG", "#f28aa0", "RECOMMEND_NG"], ["FINAL_OK", "Final OK", "#0f9d76", "FINAL"], ["FINAL_NG", "Final NG", "#c42b4b", "FINAL"]];
-  const R = 70, C = 2 * Math.PI * R; let acc = 0;
-  const arcs = segs.map(([k, lb, col]) => { const n = c[k]; if (!n) return ""; const len = Math.max((n / total) * C - 2.5, 1); const s = `<circle cx="88" cy="88" r="${R}" stroke="${col}" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-acc}" data-tip="${lb}: ${n} (${Math.round((n / total) * 100)}%)" data-st="${segs.find((x) => x[0] === k)[3]}"/>`; acc += (n / total) * C; return s; }).join("");
-  const cats = {}; ITEMS.forEach((i) => { const k = i.evaluation.errorCategory; (cats[k] ||= { o: 0, f: 0 }); finalOf(i) ? cats[k].f++ : cats[k].o++; });
-  const catRows = Object.entries(cats).sort((a, b) => b[1].o + b[1].f - (a[1].o + a[1].f)).slice(0, 8), maxC = Math.max(...catRows.map(([, v]) => v.o + v.f));
-  const routes = {}; ITEMS.filter((i) => !finalOf(i)).forEach((i) => (routes[i.evaluation.routeTo] = (routes[i.evaluation.routeTo] || 0) + 1));
-  const routeRows = Object.entries(routes).sort((a, b) => b[1] - a[1]), maxR = Math.max(1, ...routeRows.map((x) => x[1]));
-  const att = ITEMS.filter((i) => !finalOf(i) && (i.evaluation.status === "AWAITING_INPUT" || i.evaluation.status === "NEED_HUMAN_REVIEW")).slice(0, 6);
-  const act = [...S.audit].reverse().slice(0, 6);
-  const ready = c.RECOMMEND_OK + c.RECOMMEND_NG;
-  const k = (cls, label, val, st, note) => `<button class="kpi ${cls}" data-go="${st}"><span>${label}</span><b>${val}</b>${note ? `<em>${note}</em>` : ""}</button>`;
-  $("#main").innerHTML = header("HOME / OVERVIEW", "Overview", `${open} of ${total} records still open · ${ready} ready for an Approver to confirm · judged on ${today}`) + `
+  const pc = (n) => (d.total ? Math.round((n / d.total) * 100) : 0);
+  const kpi = (cls, label, n, sub, go) => `<button class="kpi ${cls}" ${go ? `data-go="${go}"` : ""}><span>${label}</span><b>${n}</b><em>${sub}</em></button>`;
+  const catRows = Object.entries(d.cats).sort((a, b) => b[1].all - a[1].all);
+  const supRows = Object.entries(d.sup).sort((a, b) => (b[1].needSup + b[1].pending) - (a[1].needSup + a[1].pending)).slice(0, 8);
+  const trendDays = Object.keys(d.trend).sort().slice(-14);
+  const trendMax = Math.max(1, ...trendDays.map((k) => d.trend[k]));
+  const BAND = [["OK", d.ok.length, "var(--green)"], ["NG", d.ng.length, "var(--red)"], ["Need confirmation", d.needSup.length, "#f5a524"],
+                ["Working", d.working.length, "var(--violet)"], ["Needs input", d.awaiting.length, "var(--brand)"], ["Human review", d.review.length, "var(--ink)"],
+                ["Ready to confirm", d.readyToConfirm.length, "var(--blue)"]].filter(([, n]) => n);
+  // the biggest single thing standing between now and a finished register
+  const blockers = [["Waiting on an answer (destination, mass class, Purchasing)", d.awaiting.length, "AWAITING_INPUT"],
+                    ["Waiting on a supplier to confirm", d.needSup.length, "NEED_SUPPLIER"],
+                    ["Waiting on an Approver to confirm OK/NG", d.readyToConfirm.length, "RECOMMEND_OK"],
+                    ["Cannot be judged — data missing or conflicting", d.review.length, "NEED_HUMAN_REVIEW"]].sort((a, b) => b[1] - a[1]);
+
+  $("#main").innerHTML = header("HOME / OVERVIEW", "Overview",
+    `${d.total} submissions · ${d.pending.length} pending internal judgment · ${d.judged} judged (${d.pct}%) · ${today}`) + `
   <div class="kpis">
-    ${k("", "All records", total, "", `${new Set(S.records.map((r) => IMDS.partKey(r))).size} part numbers`)}
-    ${k("y", "Needs input", c.AWAITING_INPUT, "AWAITING_INPUT", "waiting for an answer")}
-    ${k("b", "Ready to confirm", ready, "RECOMMEND_OK", `${c.RECOMMEND_OK} OK · ${c.RECOMMEND_NG} NG`)}
-    ${k("p", "Human review", c.NEED_HUMAN_REVIEW, "NEED_HUMAN_REVIEW", "engine cannot decide")}
-    ${k("k", "Final (approved)", final, "FINAL", `${c.FINAL_OK} OK · ${c.FINAL_NG} NG`)}
+    ${kpi("k", "Total submissions", d.total, `${d.parts.size} part numbers`, "")}
+    ${kpi("p", "Pending internal judgment", d.pending.length, `${pc(d.pending.length)}% of all submissions`, "PENDING")}
+    ${kpi("g", "OK", d.ok.length, `${d.auto} auto-judged · ${d.ok.length - d.auto} manual`, "OK")}
+    ${kpi("r", "NG", d.ng.length, `${pc(d.ng.length)}% of all submissions`, "NG")}
+    ${kpi("y", "⚠️ Need confirmation to supplier", d.needSup.length, d.needSup.length ? "waiting on the supplier" : "none outstanding", "NEED_SUPPLIER")}
   </div>
   <div class="ov">
-    <div class="card c7"><h3>Judgement pipeline</h3><p class="hint">Where every record stands right now. Click a slice or a row to open it in the register.</p>
-      <div class="donutwrap"><div class="donut"><svg viewBox="0 0 176 176"><circle cx="88" cy="88" r="${R}" stroke="#fff"/>${arcs}</svg><div class="mid"><b>${total}</b><span>records</span></div></div>
-      <div class="legend">${segs.map(([kk, lb, col, st]) => `<button class="lg" data-st="${st}"><i style="background:${col}"></i><span>${lb}</span><b>${c[kk]}</b><em>${Math.round((c[kk] / total) * 100)}%</em></button>`).join("")}</div></div></div>
-    <div class="card c5"><h3>Completion</h3><p class="hint">Share of records with a confirmed final OK / NG.</p>
-      <div class="bignum">${pct}<span style="font-size:22px;color:var(--muted)">%</span></div>
-      <div class="prog" style="margin:14px 0 18px"><i data-tip="Final OK: ${c.FINAL_OK}" style="width:${(c.FINAL_OK / total) * 100}%;background:#0f9d76"></i><i data-tip="Final NG: ${c.FINAL_NG}" style="width:${(c.FINAL_NG / total) * 100}%;background:#c42b4b"></i><i data-tip="Open: ${open}" style="flex:1;background:var(--line)"></i></div>
-      <div class="tile"><div class="ti" style="background:var(--brand)">${ICO.out}</div><div><b>${ready}</b><span>Ready for Approver to confirm</span></div></div>
-      <div class="tile"><div class="ti" style="background:var(--violet)">${ICO.inn}</div><div><b>${c.NEED_HUMAN_REVIEW + c.AWAITING_INPUT}</b><span>Need a person to decide or answer</span></div></div></div>
-    <div class="card c7"><h3>Error types</h3><p class="hint">Top error categories — open vs. finalised.</p>
-      <div class="legend2"><span><i class="sw" style="background:var(--brand)"></i>Open</span><span><i class="sw" style="background:var(--violet)"></i>Finalised</span></div>
-      <div class="bars">${catRows.map(([n, v]) => `<button class="bar" data-cat="${esc(n)}" data-tip="${esc(n)} — ${v.o} open · ${v.f} final"><span class="nm">${esc(n)}</span><span class="tr"><i class="f" style="width:${(v.f / maxC) * 100}%"></i><i class="o" style="width:${(v.o / maxC) * 100}%"></i></span><span class="v">${v.o + v.f}</span></button>`).join("")}</div></div>
-    <div class="card c5"><h3>Waiting on</h3><p class="hint">Open items by who needs to act next.</p>
-      <div class="bars">${routeRows.length ? routeRows.map(([n, v]) => `<button class="bar" data-route="${esc(n)}" data-tip="${esc(n)}: ${v} open"><span class="nm">${esc(n)}</span><span class="tr"><i class="o" style="width:${(v / maxR) * 100}%"></i></span><span class="v">${v}</span></button>`).join("") : '<p class="small">Nothing open 🎉</p>'}</div></div>
-    <div class="card c7"><h3>Needs attention</h3><p class="hint">Next items that are waiting on a person.</p>
-      <div class="list">${att.length ? att.map((i) => `<button class="li" data-k="${esc(i.key)}"><div><div class="t1 mono">${esc(i.record.deliveryPartNo)} · ${esc(i.evaluation.errorCategory)}</div><div class="t2">${esc(i.record.supplierCode || "")} ${esc(i.record.companyName || "")} · ${esc(i.evaluation.pendingQuestion ? i.evaluation.pendingQuestion.question.split(": ")[0] : (i.evaluation.reasons[0] || ""))}</div></div>${statusTag(i)}</button>`).join("") : '<p class="small">Nothing is waiting for input.</p>'}</div></div>
-    <div class="card c5"><h3>Recent activity</h3><p class="hint">Latest answers and approvals.</p>
-      <div class="list">${act.length ? act.map((x) => `<div class="li" style="cursor:default"><div><div class="t1">${esc(x.action)}${x.part ? " · " + esc(x.part) : ""}</div><div class="t2">${esc(x.user || "")} · ${esc((x.at || "").replace("T", " ").slice(0, 16))}</div></div></div>`).join("") : '<p class="small">No activity yet.</p>'}</div></div>
+    <div class="card w c5"><h3>Completion</h3><p class="hint">Submissions with a recorded OK or NG.</p>
+      <div class="bignum">${d.pct}<span style="font-size:22px">%</span></div>
+      <div class="prog" style="margin-top:10px">${BAND.map(([l, n, c]) => `<i title="${esc(l)}: ${n}" style="width:${(n / d.total) * 100}%;background:${c}"></i>`).join("")}</div>
+      <div class="legend2" style="flex-wrap:wrap;margin-top:12px">${BAND.map(([l, n, c]) => `<span><i class="sw" style="background:${c}"></i>${esc(l)} ${n}</span>`).join("")}</div>
+      <div class="tile" style="margin-top:14px"><div class="ti" style="background:var(--brand)">${ICO.up}</div><div><b>${d.readyToConfirm.length}</b><span>ready for an Approver to confirm</span></div></div>
+      <div class="tile"><div class="ti" style="background:var(--violet)">${ICO.inn}</div><div><b>${d.awaiting.length + d.review.length}</b><span>need a person to answer or decide</span></div></div>
+    </div>
+    <div class="card c7"><h3>Where the bottleneck is</h3><p class="hint">Open work, biggest first. Click to open those cases.</p>
+      <div class="bars">${blockers.filter(([, n]) => n).map(([l, n, s]) => `<button class="bar" data-go="${s}"><span class="nm">${esc(l)}</span><span class="tr"><i class="o" style="width:${(n / Math.max(1, blockers[0][1])) * 100}%"></i></span><span class="v">${n}</span></button>`).join("") || `<p class="small">Nothing open — every submission has a judgement.</p>`}</div>
+      <div class="legend2" style="margin-top:16px"><span>Total part numbers with an error <b style="color:var(--ink)">${d.partsWithError.size}</b></span><span>Total errors in the log <b style="color:var(--ink)">${d.total}</b></span></div>
+    </div>
+    <div class="card c6" style="align-self:start"><h3>Error types</h3><p class="hint">Open vs. judged, per error category.</p>
+      <div class="legend2"><span><i class="sw" style="background:var(--brand)"></i>Open</span><span><i class="sw" style="background:var(--violet)"></i>Judged</span></div>
+      <div class="bars">${catRows.map(([c, v]) => `<button class="bar" data-cat="${esc(c)}"><span class="nm">${esc(c)}</span><span class="tr"><i class="o" style="width:${(v.open / v.all) * 100}%"></i><i class="f" style="width:${(v.done / v.all) * 100}%"></i></span><span class="v">${v.all}</span></button>`).join("")}</div>
+    </div>
+    <div class="card c6"><h3>By supplier</h3><p class="hint">Suppliers with the most open work.</p>
+      <table><thead><tr><th>Supplier</th><th>OK</th><th>NG</th><th>⚠️</th><th>Pending</th><th>All</th></tr></thead><tbody>
+      ${supRows.map(([k, v]) => { const [code, name] = k.split("|"); return `<tr><td><b class="mono">${esc(code)}</b><div class="small">${esc(name.slice(0, 28))}</div></td>
+        <td style="color:var(--green)">${v.ok || ""}</td><td style="color:var(--red)">${v.ng || ""}</td><td style="color:var(--yellow)">${v.needSup || ""}</td><td>${v.pending || ""}</td><td><b>${v.all}</b></td></tr>`; }).join("")}
+      </tbody></table>
+    </div>
+    ${trendDays.length > 1 ? `<div class="card c12"><h3>Judgement completion trend</h3><p class="hint">Judgements recorded per day, from the audit trail.</p>
+      <div class="bars">${trendDays.map((day) => `<div class="bar"><span class="nm mono">${esc(day)}</span><span class="tr"><i class="f" style="width:${(d.trend[day] / trendMax) * 100}%"></i></span><span class="v">${d.trend[day]}</span></div>`).join("")}</div></div>` : ""}
+    <div class="card w c12"><h3>Download judgement summary</h3><p class="hint">Everything shown here, as a file. The filtered option exports only what matches the filters below.</p>
+      <div class="tools" style="margin-bottom:10px">
+        <select id="dl-sup" class="btn"><option value="">All suppliers</option>${Object.keys(d.sup).sort().map((k) => { const [c, n] = k.split("|"); return `<option value="${esc(k)}" ${UI.dlSup === k ? "selected" : ""}>${esc(c)} ${esc(n.slice(0, 30))}</option>`; }).join("")}</select>
+        <select id="dl-status" class="btn"><option value="">All statuses</option>${WORKSPACE_STATUSES.map(([v, l]) => `<option value="${v}" ${UI.dlStatus === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+        <label class="small">From <input type="date" id="dl-from" class="btn" value="${esc(UI.dlFrom || "")}"></label>
+        <label class="small">To <input type="date" id="dl-to" class="btn" value="${esc(UI.dlTo || "")}"></label>
+        <span class="small" id="dl-count"></span>
+      </div>
+      <div class="tools">
+        <button class="btn pri" id="dl-xlsx">⬇ Download summary (Excel)</button>
+        <button class="btn" id="dl-pdf">⬇ Download summary (PDF)</button>
+        <button class="btn" id="dl-reset">Clear filters</button>
+      </div>
+    </div>
+    <div class="card c12"><h3>Recent activity</h3><p class="hint">Latest answers, judgements and imports.</p>
+      <div class="list">${[...S.audit].reverse().slice(0, 8).map((x) => `<div class="li"><div><div class="t1">${esc(x.action)} ${esc(x.part || "")}</div><div class="t2">${esc(x.user || "")} ${esc(x.detail || x.comment || "")}</div></div><div class="small mono">${esc((x.at || "").replace("T", " ").slice(0, 16))}</div></div>`).join("") || '<p class="small">No activity yet.</p>'}</div></div>
   </div>`;
-  const toReg = (patch) => { UI.q = ""; UI.cat = "All"; UI.status = ""; UI.route = ""; Object.assign(UI, { view: "register", sel: null }, patch); render(); };
-  document.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => toReg({ status: b.dataset.go })));
-  document.querySelectorAll(".lg[data-st],.donut circle[data-st]").forEach((b) => (b.onclick = () => toReg({ status: b.dataset.st })));
+
+  const toReg = (patch) => { UI.q = ""; UI.cat = "All"; UI.status = ""; UI.route = ""; UI.pendingOnly = false; Object.assign(UI, { view: "register", sel: null }, patch); render(); };
+  document.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => {
+    const g = b.dataset.go;
+    if (!g) return toReg({});
+    if (g === "PENDING") { toReg({}); UI.pendingOnly = true; return render(); }
+    toReg({ status: g });
+  }));
   document.querySelectorAll(".bar[data-cat]").forEach((b) => (b.onclick = () => toReg({ cat: b.dataset.cat })));
-  document.querySelectorAll(".bar[data-route]").forEach((b) => (b.onclick = () => toReg({ route: b.dataset.route })));
-  document.querySelectorAll(".li[data-k]").forEach((b) => (b.onclick = () => toReg({ sel: b.dataset.k })));
+  const upd = () => { UI.dlSup = $("#dl-sup").value; UI.dlStatus = $("#dl-status").value; UI.dlFrom = $("#dl-from").value; UI.dlTo = $("#dl-to").value; $("#dl-count").textContent = `${downloadRows().length} of ${ITEMS.length} records match`; };
+  ["#dl-sup", "#dl-status", "#dl-from", "#dl-to"].forEach((s) => ($(s).onchange = upd));
+  upd();
+  $("#dl-reset").onclick = () => { UI.dlSup = UI.dlStatus = UI.dlFrom = UI.dlTo = ""; render(); };
+  $("#dl-xlsx").onclick = () => exportJudgementSummaryXlsx().catch((e) => toast("Export failed: " + e.message));
+  $("#dl-pdf").onclick = () => exportJudgementSummaryPdf();
+}
+
+/** The records the Download Summary covers, after the dashboard's filters. */
+function downloadRows() {
+  return ITEMS.filter((it) => {
+    const r = it.record, f = finalOf(it);
+    if (UI.dlSup && `${r.supplierCode || "—"}|${r.companyName || ""}` !== UI.dlSup) return false;
+    if (UI.dlStatus && statusKey(it) !== UI.dlStatus) return false;
+    if (UI.dlFrom || UI.dlTo) {
+      const when = (f && f.at ? f.at : (flagOf(it) || {}).at || r.downloadDate || "").slice(0, 10);
+      if (!when) return false;
+      if (UI.dlFrom && when < UI.dlFrom) return false;
+      if (UI.dlTo && when > UI.dlTo) return false;
+    }
+    return true;
+  });
+}
+/** One flat row per record, in the columns the summary report asks for. */
+const DL_HEADERS = ["Supplier Name", "Supplier Code", "Vendor Code", "WARP Part Number", "Vehicle Destination", "Judgment Result",
+                    "Judgment Type", "Internal Remarks", "IMDS Reject Comment", "Reviewer Name", "Judgment Date", "Current Processing Status",
+                    "Error Type", "CAS No.", "Substance", "Material", "Mass Tolerance Class"];
+function downloadRecords(rows) {
+  return rows.map((it) => {
+    const r = it.record, e = it.evaluation, f = finalOf(it), fl = flagOf(it), a = answersFor(r);
+    const result = f ? (f.newStatus === "FINAL_OK" ? "OK" : "NG") : statusKey(it) === "NEED_SUPPLIER" ? "Need Confirmation" : "";
+    const dest = a.destination ? `${IMDS.DEST_LABEL[a.destination] || a.destination}${IMDS.destRegion(a.destination) ? ` [${IMDS.destRegion(a.destination)}]` : ""}` : "";
+    return [r.companyName || "", r.supplierCode || "", "", r.deliveryPartNo || "", dest, result,
+            f ? (f.judgmentType || "Manual judgment") : "", f ? f.comment || "" : (fl ? fl.comment || "" : ""), f ? f.imdsReject || "" : "",
+            f ? f.user : (fl ? fl.user : ""), f ? f.at.replace("T", " ").slice(0, 16) : (fl ? fl.at.replace("T", " ").slice(0, 16) : ""),
+            STATUS_LABEL[statusKey(it)] || statusKey(it), e.errorCategory || "", r.cas || "", r.substanceName || "", r.materialName || "", a.massClass || ""];
+  });
+}
+function downloadSummaryStats(rows) {
+  const n = (f) => rows.filter(f).length;
+  const okN = n((i) => statusKey(i) === "OK"), ngN = n((i) => statusKey(i) === "NG");
+  return [["Total submissions", rows.length], ["Total OK", okN], ["Total NG", ngN],
+          ["Total pending internal judgment", n(isPendingInternal)],
+          ["Total need confirmation to supplier", n((i) => statusKey(i) === "NEED_SUPPLIER")],
+          ["Auto judged", rows.filter((i) => (finalOf(i) || {}).judgmentType === "Auto Judged").length],
+          ["Overall completion", `${rows.length ? Math.round(((okN + ngN) / rows.length) * 100) : 0}%`]];
+}
+function filterNote() {
+  const bits = [];
+  if (UI.dlSup) bits.push(`supplier ${UI.dlSup.replace("|", " ")}`);
+  if (UI.dlStatus) bits.push(`status ${STATUS_LABEL[UI.dlStatus] || UI.dlStatus}`);
+  if (UI.dlFrom) bits.push(`from ${UI.dlFrom}`);
+  if (UI.dlTo) bits.push(`to ${UI.dlTo}`);
+  return bits.length ? `Filtered: ${bits.join(" · ")}` : "Complete judgement summary (no filters)";
+}
+async function exportJudgementSummaryXlsx() {
+  const rows = downloadRows();
+  if (!rows.length) return toast("No records match the filters");
+  const stats = downloadSummaryStats(rows);
+  const head = [[{ v: `G-CATS Auto-Judgement — judgement summary · ${today}`, s: S_TITLE }], [{ v: filterNote(), s: 3 }], []];
+  const summary = [...head, [{ v: "Summary", s: 1 }, { v: "", s: 1 }], ...stats.map(([k, v]) => [{ v: k, s: 3 }, { v, t: typeof v === "number" ? "n" : "s", s: 3 }])];
+  const detail = [[{ v: `Judgement detail · ${rows.length} record${rows.length === 1 ? "" : "s"}`, s: S_TITLE }],
+                  DL_HEADERS.map((h) => ({ v: h, s: S_HEAD })),
+                  ...downloadRecords(rows).map((rec, i) => { const st = statusFill(rows[i]); return rec.map((v, c) => ({ v, s: c === 5 ? st : 3 })); })];
+  const blob = await workbook([
+    { name: "Summary", rows: summary, widths: [40, 22] },
+    { name: "Judgement detail", rows: detail, widths: [30, 13, 13, 16, 30, 14, 16, 44, 36, 18, 18, 24, 22, 14, 26, 20, 10], freeze: 2, filter: `A2:${colName(DL_HEADERS.length - 1)}${rows.length + 2}` },
+    { name: "How to read", ...summaryLegendRows() },
+  ]);
+  await saveFile(`TMMIN_GCATS_judgement_summary_${today}.xlsx`, blob, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  S.audit.push({ at: new Date().toISOString(), ...user(), action: "EXPORT", detail: `Judgement summary (Excel): ${rows.length} records · ${filterNote()}` }); save();
+  toast(`Excel summary downloaded — ${rows.length} records`);
+}
+function exportJudgementSummaryPdf() {
+  const rows = downloadRows();
+  if (!rows.length) return toast("No records match the filters");
+  const stats = downloadSummaryStats(rows), recs = downloadRecords(rows);
+  let root = $("#print-root"); if (!root) { root = document.createElement("div"); root.id = "print-root"; document.body.appendChild(root); }
+  root.innerHTML = `<h1>G-CATS Auto-Judgement — judgement summary</h1>
+  <p>${esc(today)} · ${esc(filterNote())} · generated by ${esc(user().user)} (${esc(user().role)})</p>
+  <h2>Summary</h2><table class="k"><tr>${stats.map(([k]) => `<td>${esc(k)}</td>`).join("")}</tr><tr>${stats.map(([, v]) => `<td><b>${esc(v)}</b></td>`).join("")}</tr></table>
+  <h2>Judgement detail (${recs.length})</h2>
+  <table><thead><tr>${DL_HEADERS.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>
+  ${recs.map((r) => `<tr>${r.map((v) => `<td>${esc(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>
+  <p>Engine recommendations are not final Toyota decisions until confirmed by an Approver. Auto Judged rows were decided by the WARP part-number rule.</p>`;
+  S.audit.push({ at: new Date().toISOString(), ...user(), action: "EXPORT", detail: `Judgement summary (PDF): ${rows.length} records · ${filterNote()}` }); save();
+  setTimeout(() => window.print(), 60);
 }
 
 function viewRegister() {
@@ -1234,7 +1484,7 @@ function viewRegister() {
   const parts = new Set(S.records.map((r) => IMDS.partKey(r))).size;
   const rows = filtered();
   const sel = ITEMS.find((i) => i.key === UI.sel);
-  $("#main").innerHTML = header("WORK / JUDGEMENT", "Judgement Register", `${S.records.length} records · ${parts} part numbers · judged on ${today}`) + `
+  $("#main").innerHTML = header("WORK / JUDGMENT", "Judgment Workspace", `${S.records.length} submissions · ${parts} part numbers · ${ITEMS.filter(isPendingInternal).length} pending internal judgment · judged on ${today}`) + `
   <div class="kpis">
     <button class="kpi ${UI.status === "" ? "act" : ""}" data-st=""><span>All records</span><b>${S.records.length}</b></button>
     <button class="kpi y ${UI.status === "AWAITING_INPUT" ? "act" : ""}" data-st="AWAITING_INPUT"><span>Needs input</span><b>${cnt((i) => statusKey(i) === "AWAITING_INPUT")}</b></button>
@@ -1246,13 +1496,14 @@ function viewRegister() {
   <div class="card">
     <div class="tools">
       <input type="search" id="q" placeholder="Part no., supplier, CAS, substance…" value="${esc(UI.q)}">
-      <select id="f-status"><option value="">All statuses</option>${["AWAITING_INPUT", "RECOMMEND_OK", "RECOMMEND_NG", "NEED_HUMAN_REVIEW", "FINAL"].map((s) => `<option value="${s}" ${UI.status === s ? "selected" : ""}>${STATUS_LABEL[s]}</option>`).join("")}</select>
+      <select id="f-status"><option value="">All statuses</option>${WORKSPACE_STATUSES.map(([v, l]) => `<option value="${v}" ${UI.status === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
       <select id="f-route"><option value="">All routes</option>${["Supplier", "Purchasing", "Internal", "Approval", "Escalation (TMC/TMNA/TME/TDEM)"].map((s) => `<option ${UI.route === s ? "selected" : ""}>${s}</option>`).join("")}</select>
       <button class="btn pri" id="xl">⬇ Excel (Error Log format)</button>
       <button class="btn" id="sum">⬇ Summary report (Excel)</button>
       <button class="btn" id="pdf">⬇ Printable summary</button>
       <button class="btn" id="export">CSV</button>
     </div>
+    ${UI.pendingOnly ? `<div class="chips"><button class="chip on" id="clear-pending">Pending internal judgment only ✕</button></div>` : ""}
     <div class="chips">${["All", ...Object.keys(cats).sort()].map((c) => `<button class="chip ${UI.cat === c ? "on" : ""}" data-cat="${esc(c)}">${esc(c)}<i>${c === "All" ? ITEMS.length : cats[c]}</i></button>`).join("")}</div>
     ${S.records.length ? "" : `<p class="small">No records yet. Go to <b>Daily G-CATS Update</b> to import the Error Check Log, or load the July 2024 sample.</p>`}
   </div>
@@ -1278,6 +1529,7 @@ function viewRegister() {
   $("#xl").onclick = () => exportXlsx().catch((e) => toast("Excel export failed: " + e.message));
   $("#sum").onclick = () => exportSummaryXlsx().catch((e) => toast("Summary export failed: " + e.message));
   $("#pdf").onclick = exportPdf;
+  const cp = $("#clear-pending"); if (cp) cp.onclick = () => { UI.pendingOnly = false; render(); };
   document.querySelectorAll("[data-cat]").forEach((b) => (b.onclick = () => { UI.cat = b.dataset.cat; render(); }));
   document.querySelectorAll("tr.row").forEach((tr) => (tr.onclick = () => { UI.sel = tr.dataset.k; UI.decision = null; render(); }));
   if (sel) bindDrawer(sel);
@@ -1293,7 +1545,7 @@ function chainHtml(c) {
 }
 
 function drawer(it) {
-  const r = it.record, e = it.evaluation, f = finalOf(it), g = GROUP_OF.get(it.key), u = user();
+  const r = it.record, e = it.evaluation, f = finalOf(it), fl = flagOf(it), g = GROUP_OF.get(it.key), u = user();
   const canFinal = u.role === "Approver" || u.role === "Administrator";
   const rec = e.recommendedJudge;
   const decision = UI.decision || rec;
@@ -1304,6 +1556,20 @@ function drawer(it) {
   <h2 class="mono">${esc(r.deliveryPartNo)}</h2>
   <div class="meta">${esc(e.errorCategory)} · ${esc(r.supplierCode)} ${esc(r.companyName || "")} · module ${esc(r.moduleId)} v${esc(r.moduleVersion)}<br>
    ${esc(r.componentPartName || r.deliveryPartName || "")} ${r.materialName ? "· " + esc(r.materialName) : ""} ${r.materialClass ? "(" + esc(r.materialClass) + ")" : ""} ${r.contentPct != null ? "· " + esc(r.contentPct) + " wt%" : ""} ${r.applicationId ? "· App ID " + esc(r.applicationId) : ""}</div>
+  ${(() => {
+    const sc = selfChecksForPart(r.deliveryPartNo);
+    if (!sc.length) return "";
+    const fields = (x) => [["Mass class", x.massClass], ["(A) mass", x.massA], ["(B) total mass", x.massB], ["Drawing mass", x.drawingMass], ["Actual mass", x.actualMass],
+      ["Material", x.materialName], ["Substance", x.substanceName], ["CAS", x.cas], ["Content %", x.substanceContent], ["Application ID", x.applicationId], ["Purpose of use", x.purpose]]
+      .filter(([, v]) => v != null && v !== "");
+    return `<div class="box chain"><b>Supplier self-check sheet</b> <span class="tag t-route">${sc.length} line${sc.length > 1 ? "s" : ""}</span>
+      <div class="small">Already submitted by ${esc(sc[0].companyName || sc[0].supplierCode || "the supplier")}${sc[0]._sub.submittedDate ? ` on ${esc(sc[0]._sub.submittedDate)}` : ""} — check here before asking again.</div>
+      ${sc.slice(0, 3).map((x) => `<div style="margin-top:8px">${fields(x).map(([k, v]) => `<div class="small"><b>${esc(k)}:</b> ${esc(v)}</div>`).join("")}
+        ${x.explanation ? `<div class="small"><b>Supplier explanation:</b> ${esc(x.explanation)}</div>` : ""}
+        ${x.materialRemarks ? `<div class="small"><b>Remarks:</b> ${esc(x.materialRemarks)}</div>` : ""}</div>`).join("")}
+      ${sc.length > 3 ? `<div class="small">+ ${sc.length - 3} more line(s) — see Supplier Self-Check</div>` : ""}
+      <button class="btn" id="go-self" style="margin-top:8px">Open Supplier Self-Check</button></div>`;
+  })()}
   ${chainHtml(e.substanceChain)}
   <div class="small">Flow ${esc(e.flowId || "—")} ${e.flowVersion ? "v" + esc(e.flowVersion) : ""}</div>
   <ul class="steps">${e.trace.map((t) => `<li>${icon(t)}<div><b>${esc(t.label)}</b><div>${esc(t.detail || "")}${t.answeredBy ? ` · answered (${esc(t.answeredBy)})` : ""}</div></div></li>`).join("")}</ul>
@@ -1313,18 +1579,28 @@ function drawer(it) {
      ${g ? `<label class="small" style="display:block;margin-top:8px"><input type="checkbox" id="ag" ${UI.applyGroup ? "checked" : ""}> Apply to all ${g.length} identical cases (each is re-checked on its own data)</label>` : ""}</div>` : ""}
   ${!f && e.status === "NEED_HUMAN_REVIEW" ? `<div class="box rev"><b>Human review</b>${e.reasons.map((x) => `<div>${esc(x)}</div>`).join("")}</div>` : ""}
   ${!f && rec ? `<div class="box ${rec === "OK" ? "rec-ok" : "rec-ng"}"><b>Recommendation: ${rec}</b><div>${esc(e.comment)}</div></div>` : ""}
+  ${(() => { if (f) return ""; const c = warpAutoCheck(it); if (c.why === "Not a WARP part number error") return "";
+      return `<div class="box ${c.ng ? "rec-ng" : "chain"}"><b>WARP auto-judgement</b><div>${c.ok ? "Qualifies for an automatic OK" : "Not auto-judged"} — ${esc(c.why)}</div>${rule("warpAuto") ? "" : `<div class="small">The rule is switched off in Settings.</div>`}</div>`; })()}
   ${answered.length && !f ? `<details><summary>Answers given (${answered.length}) — reset</summary><div class="opts">${answered.map(([k, v]) => `<button class="opt" data-reset="${esc(k)}" title="remove this answer">${esc(k)} = ${esc(v)} ✕</button>`).join("")}</div></details>` : ""}
-  ${f ? `<div class="box fin"><b>Final ${f.newStatus === "FINAL_OK" ? "OK" : "NG"}</b> · ${esc(f.action)} by ${esc(f.user)} (${esc(f.role)}) · ${esc(f.at.replace("T", " ").slice(0, 16))}
-      <div>${esc(f.comment)}</div>${f.justification ? `<div class="small">Justification: ${esc(f.justification)}</div>` : ""}
-      <div class="small">AI recommendation: ${esc(f.aiRecommendation || "none")} (${esc(f.previousStatus)}) at ${esc(f.aiTimestamp.slice(0, 16))}</div>
+  ${f ? `<div class="box fin"><b>${f.newStatus === "FINAL_OK" ? "OK" : "NG"}</b> · ${esc(f.judgmentType || "Manual judgment")} · ${esc(f.action)} by ${esc(f.user)} (${esc(f.role)}) · ${esc(f.at.replace("T", " ").slice(0, 16))}
+      <div>${esc(f.comment)}</div>${f.imdsReject ? `<div class="small"><b>IMDS reject comment:</b> ${esc(f.imdsReject)}</div>` : ""}${f.justification ? `<div class="small">Justification: ${esc(f.justification)}</div>` : ""}
+      <div class="small">Engine recommendation: ${esc(f.aiRecommendation || "none")} (${esc(f.previousStatus)}) at ${esc((f.aiTimestamp || "").slice(0, 16))}</div>
       ${canFinal ? `<button class="btn" id="reopen" style="margin-top:8px">Re-open (new decision will be logged)</button>` : ""}</div>` : `
-  <div class="card" style="padding:10px;margin-top:8px"><b>Final judgement</b> <span class="small">${canFinal ? "" : "— switch role to Approver to confirm"}</span>
-    <div class="judge"><button class="jb ok ${decision === "OK" ? "on" : ""}" data-dec="OK">✓ OK</button><button class="jb ng ${decision === "NG" ? "on" : ""}" data-dec="NG">⊗ NG</button></div>
-    <label class="l">Record of changing to OK / IMDS comment</label>
+  ${fl ? `<div class="box ${fl.status === "NEED_SUPPLIER" ? "ask" : "rev"}"><b>${fl.status === "NEED_SUPPLIER" ? "⚠️ Waiting on supplier confirmation" : "Under internal judgment"}</b>
+      <div class="small">${esc(fl.user)} (${esc(fl.role)}) · ${esc(fl.at.replace("T", " ").slice(0, 16))}</div>
+      ${fl.comment ? `<div>${esc(fl.comment)}</div>` : ""}
+      <button class="btn" id="unflag" style="margin-top:8px">Clear this status</button></div>` : ""}
+  <div class="card" style="padding:12px;margin-top:8px"><b>Internal judgment</b>
+    <label class="l">Assigned person</label><div class="mono small">${esc(u.user === "unnamed" ? "— type your name in the sidebar —" : u.user)} · ${esc(u.role)}</div>
+    <div class="judge" style="grid-template-columns:1fr 1fr"><button class="jb ok ${decision === "OK" ? "on" : ""}" data-dec="OK">✓ OK</button><button class="jb ng ${decision === "NG" ? "on" : ""}" data-dec="NG">⊗ NG</button></div>
+    <div class="opts" style="margin-top:8px"><button class="opt" id="mark-working">Mark as Working</button><button class="opt" id="mark-supplier">⚠️ Need confirmation to supplier</button></div>
+    <label class="l">Comment — record of changing to "OK" (required)</label>
     <textarea id="cmt">${esc(decision && decision === rec ? e.comment || "" : "")}</textarea>
+    ${decision === "NG" ? `<label class="l">IMDS reject comment (sent to the supplier)</label><textarea id="imdsrej">${esc(e.comment || "")}</textarea>` : ""}
     ${override ? `<label class="l">Override justification (required)</label><textarea id="just"></textarea>` : ""}
     ${g && (e.status === "RECOMMEND_OK" || e.status === "RECOMMEND_NG") ? `<label class="small" style="display:block;margin-top:6px"><input type="checkbox" id="ag2" checked> Confirm for all ${g.length} identical cases</label>` : ""}
-    <button class="btn pri" id="confirm" style="margin-top:8px;width:100%" ${canFinal && decision ? "" : "disabled"}>Confirm final judgement</button>
+    <button class="btn pri" id="confirm" style="margin-top:8px;width:100%" ${canFinal && decision ? "" : "disabled"}>Confirm judgment</button>
+    <div class="small" style="margin-top:6px">${canFinal ? "Recorded with your name, role and the time." : `Your role (${esc(u.role)}) can set Working and Need confirmation, but only an Approver records a final OK/NG.`}</div>
   </div>`}
   <details style="margin-top:10px"><summary>Reference versions used</summary>${Object.entries(e.referenceVersions).map(([k, v]) => `<div class="small mono">${esc(k)}: ${esc(v)}</div>`).join("")}</details>
   </div>`;
@@ -1344,7 +1620,7 @@ function bindDrawer(it) {
     const g = GROUP_OF.get(it.key);
     const members = g && UI.applyGroup ? g : [it];
     for (const m of members) setAnswer(m.record, key, value);
-    evaluateAll(); save();
+    evaluateAndAutoJudge(); save();
     if (members.length > 1) {
       const rep = ITEMS.find((x) => x.key === it.key).evaluation.signature;
       const diverged = members.filter((m) => ITEMS.find((x) => x.key === m.key).evaluation.signature !== rep).length;
@@ -1356,25 +1632,122 @@ function bindDrawer(it) {
     const k = b.dataset.reset, r = it.record;
     if (IMDS.PART_LEVEL_KEYS.has(k)) delete (S.partAnswers[IMDS.partKey(r)] || {})[k]; else delete (S.answers[IMDS.recordKey(r)] || {})[k];
     S.audit.push({ at: new Date().toISOString(), ...user(), action: "RESET_ANSWER", recordKey: it.key, part: r.deliveryPartNo, key: k });
-    evaluateAll(); save(); render();
+    evaluateAndAutoJudge(); save(); render();
   }));
   document.querySelectorAll("[data-dec]").forEach((b) => (b.onclick = () => { UI.decision = b.dataset.dec; render(); }));
   const c = $("#confirm"); if (c) c.onclick = () => {
     const g = GROUP_OF.get(it.key); const all = $("#ag2") && $("#ag2").checked ? g : [it];
     const comment = $("#cmt").value, just = $("#just") ? $("#just").value : undefined;
+    const imdsRej = $("#imdsrej") ? $("#imdsrej").value : "";
     try {
       for (const m of all) {
         const entry = IMDS.approve(m.evaluation, user(), UI.decision || it.evaluation.recommendedJudge, comment, just, all.length > 1 ? it.key : undefined);
         entry.part = m.record.deliveryPartNo; entry.errorCategory = m.evaluation.errorCategory; entry.supplierCode = m.record.supplierCode;
+        entry.judgmentType = "Manual judgment";
+        if (imdsRej.trim()) entry.imdsReject = imdsRej.trim();
         entry.evaluationSnapshot = { trace: m.evaluation.trace, substanceChain: m.evaluation.substanceChain };
-        S.approvals[m.key] = entry; S.audit.push({ ...entry, action: entry.action });
+        S.approvals[m.key] = entry; delete S.flags[m.key]; S.audit.push({ ...entry, action: entry.action });
       }
-      evaluateAll(); save(); toast(`Final judgement recorded for ${all.length} case${all.length > 1 ? "s" : ""}`); UI.decision = null; render();
+      evaluateAndAutoJudge(); save(); toast(`Final judgement recorded for ${all.length} case${all.length > 1 ? "s" : ""}`); UI.decision = null; render();
     } catch (err) { toast(err.message); }
   };
+  const gs = $("#go-self"); if (gs) gs.onclick = () => { UI.view = "selfcheck"; UI.selfQ = it.record.deliveryPartNo || ""; render(); };
+  const mw = $("#mark-working"); if (mw) mw.onclick = () => setFlag(it, FLAG_WORKING, "");
+  const ms = $("#mark-supplier"); if (ms) ms.onclick = () => {
+    const why = prompt("What do you need the supplier to confirm?", (flagOf(it) || {}).comment || "");
+    if (why === null) return;
+    setFlag(it, FLAG_SUPPLIER, why);
+  };
+  const uf = $("#unflag"); if (uf) uf.onclick = () => setFlag(it, null);
   const ro = $("#reopen"); if (ro) ro.onclick = () => {
     S.audit.push({ at: new Date().toISOString(), ...user(), action: "REOPEN", recordKey: it.key, part: it.record.deliveryPartNo, previous: S.approvals[it.key] });
-    delete S.approvals[it.key]; evaluateAll(); save(); render();
+    delete S.approvals[it.key]; delete S.flags[it.key]; evaluateAndAutoJudge(); save(); render();
+  };
+}
+
+function viewSelfCheck() {
+  const all = selfCheckRows();
+  const q = (UI.selfQ || "").toLowerCase();
+  const rows = all.filter((r) => !q || [r.supplierCode, r.companyName, r.partNo, r.partName, r.cas, r.substanceName, r.materialName, r.eciNo].some((v) => String(v ?? "").toLowerCase().includes(q)));
+  const bySup = {};
+  for (const r of all) { const k = `${r.supplierCode || "—"}|${r.companyName || ""}`; (bySup[k] ||= []).push(r); }
+  const subs = S.selfChecks || [];
+  $("#main").innerHTML = header("SUPPLIER / SELF-CHECK", "Supplier Self-Check Form Summary",
+    "Everything suppliers have submitted on their IMDS Material Self-Check Sheets, in one place — so you can check what is already known before asking them again.") + `
+  <div class="kpis">
+    <button class="kpi b"><span>Self-check lines</span><b>${all.length}</b><em>across ${subs.length} submitted sheet${subs.length === 1 ? "" : "s"}</em></button>
+    <button class="kpi p"><span>Suppliers covered</span><b>${Object.keys(bySup).length}</b><em>with at least one line</em></button>
+    <button class="kpi"><span>Part numbers covered</span><b>${new Set(all.map((r) => r.partKeyNorm).filter(Boolean)).size}</b><em>matched against the register by part no.</em></button>
+    <button class="kpi g"><span>Register cases with self-check data</span><b>${ITEMS.filter((i) => selfChecksForPart(i.record.deliveryPartNo).length).length}</b><em>of ${ITEMS.length} cases</em></button>
+  </div>
+  <div class="card w"><div class="tools">
+      <input type="search" id="selfq" placeholder="Supplier name, supplier code, part number, CAS…" value="${esc(UI.selfQ || "")}">
+      <input type="file" id="self-file" accept=".xlsx">
+      <button class="btn" id="self-clear">Remove all sheets</button>
+    </div>
+    <div class="small" style="margin-top:8px">Import the supplier's <b>Request for Supplier IMDS Material Self-Check Sheet</b> (.xlsx). The IMDS Information Form sheet and the contact people are read; nothing is sent anywhere.</div>
+    <div id="self-msg"></div>
+  </div>
+  ${subs.length ? `<div class="card" style="margin-top:14px"><h3>Submitted sheets</h3><p class="hint">Most recent first.</p>
+    <table><thead><tr><th>Supplier</th><th>File</th><th>Lines</th><th>Contacts</th><th>Submitted</th><th>Imported</th><th></th></tr></thead><tbody>
+    ${subs.slice().reverse().map((s, i) => `<tr><td><b>${esc(s.supplierCode || "—")}</b><div class="small">${esc(s.companyName || "")}</div></td>
+      <td class="small">${esc(s.file)}</td><td>${s.rows.length}</td><td class="small">${s.contacts.map((c) => esc(c.name || c.role || "")).filter(Boolean).join(", ") || "—"}</td>
+      <td class="mono small">${esc(s.submittedDate || "—")}</td><td class="mono small">${esc(s.importedAt.replace("T", " ").slice(0, 16))}</td>
+      <td><button class="btn" data-rmself="${esc(s.id)}">Remove</button></td></tr>`).join("")}
+    </tbody></table></div>` : ""}
+  <div class="card w" style="margin-top:14px"><h3>Self-check lines ${rows.length !== all.length ? `· ${rows.length} of ${all.length}` : `· ${all.length}`}</h3>
+    ${all.length ? `<div class="tablebox" style="max-height:none"><table><thead><tr>
+      <th>Supplier</th><th>Part number</th><th>Part name</th><th>Mass class</th><th>Masses (A/B)</th><th>Material</th><th>Substance / CAS</th><th>App ID</th><th>Purpose &amp; remarks</th><th>In register</th></tr></thead><tbody>
+      ${rows.map((r) => { const hits = ITEMS.filter((i) => String(i.record.deliveryPartNo || "").replace(/[^0-9a-z]/gi, "").toUpperCase() === r.partKeyNorm);
+        return `<tr><td><b class="mono">${esc(r.supplierCode || "—")}</b><div class="small">${esc(r.companyName || "")}</div></td>
+        <td class="mono">${esc(r.partNo || "—")}</td><td class="small">${esc(r.partName || "")}</td>
+        <td>${r.massClass ? `<span class="tag t-route">${esc(r.massClass)}</span>` : "—"}</td>
+        <td class="mono small">${esc(r.massA || "—")} / ${esc(r.massB || "—")}</td>
+        <td class="small">${esc(r.materialName || "—")}</td>
+        <td class="small">${esc(r.substanceName || "—")}${r.cas ? `<div class="mono">${esc(r.cas)}${r.substanceContent ? " · " + esc(r.substanceContent) + "%" : ""}</div>` : ""}</td>
+        <td class="mono">${esc(r.applicationId || "—")}</td>
+        <td class="small">${esc(r.purpose || "")}${r.explanation ? `<div>${esc(r.explanation)}</div>` : ""}${r.materialRemarks ? `<div>${esc(r.materialRemarks)}</div>` : ""}</td>
+        <td>${hits.length ? `<button class="btn" data-goreg="${esc(hits[0].key)}">${hits.length} case${hits.length > 1 ? "s" : ""}</button>` : `<span class="small">—</span>`}</td></tr>`; }).join("")}
+    </tbody></table></div>` : `<div class="empty"><div class="big"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11l3 3v13a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M8 12l2 2 4-4"/></svg></div>
+      <h3>No self-check sheets yet</h3><p>Import a supplier's IMDS Material Self-Check Sheet above. Once it is in, every matching case in the Judgment Workspace shows what the supplier already told you.</p></div>`}
+  ${Object.keys(bySup).length ? `<div class="card" style="margin-top:14px"><h3>Contact people</h3><p class="hint">From the Contact Person sheet of each submission.</p>
+    <table><thead><tr><th>Supplier</th><th>Role</th><th>Name</th><th>Division</th><th>Email</th><th>Phone / WA</th></tr></thead><tbody>
+    ${subs.flatMap((s) => s.contacts.map((c) => `<tr><td class="mono">${esc(s.supplierCode || "—")}<div class="small">${esc(s.companyName || "")}</div></td><td>${esc(c.role || "")}</td><td>${esc(c.name || "")}</td><td class="small">${esc(c.division || "")}</td><td class="small">${esc(c.email || "")}</td><td class="mono small">${esc(c.phone || "")}</td></tr>`)).join("") || `<tr><td colspan="6" class="small">No contact people in the imported sheets.</td></tr>`}
+    </tbody></table></div>` : ""}`;
+
+  $("#selfq").oninput = (ev) => { UI.selfQ = ev.target.value; const p = ev.target.selectionStart; render(); const el = $("#selfq"); el.focus(); el.setSelectionRange(p, p); };
+  $("#self-file").onchange = async (ev) => {
+    const file = ev.target.files[0]; if (!file) return;
+    const msg = $("#self-msg");
+    msg.innerHTML = `<div class="small" style="margin-top:8px">Reading ${esc(file.name)} …</div>`;
+    try {
+      const buf = await file.arrayBuffer();
+      const form = await readXlsx(buf, { sheet: (n) => /information\s*form/i.test(n), sheetError: 'No "IMDS Information Form" sheet in this workbook' });
+      const rows = parseSelfCheckForm(form);
+      if (!rows.length) throw new Error("No supplier lines filled in on the IMDS Information Form sheet");
+      let contacts = [];
+      try { contacts = parseContacts(await readXlsx(buf, { sheet: (n) => /contact/i.test(n) })); } catch (e) {}
+      const sub = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, file: file.name, importedAt: new Date().toISOString(),
+        supplierCode: rows[0].supplierCode || "", companyName: rows[0].companyName || "",
+        submittedDate: rows.map((r) => r.submissionDate).find(Boolean) || "", rows, contacts,
+      };
+      S.selfChecks.push(sub);
+      S.audit.push({ at: new Date().toISOString(), ...user(), action: "SELFCHECK_IMPORT", detail: `${file.name}: ${rows.length} lines, ${contacts.length} contacts (${sub.supplierCode} ${sub.companyName})` });
+      save(); toast(`${rows.length} self-check line${rows.length === 1 ? "" : "s"} imported`); render();
+    } catch (e) { msg.innerHTML = `<div class="box rec-ng" style="margin-top:8px">${esc(e.message)}</div>`; }
+  };
+  document.querySelectorAll("[data-rmself]").forEach((b) => (b.onclick = () => {
+    const id = b.dataset.rmself, sub = (S.selfChecks || []).find((s) => s.id === id);
+    S.selfChecks = (S.selfChecks || []).filter((s) => s.id !== id);
+    S.audit.push({ at: new Date().toISOString(), ...user(), action: "SELFCHECK_REMOVE", detail: sub ? sub.file : id });
+    save(); render();
+  }));
+  document.querySelectorAll("[data-goreg]").forEach((b) => (b.onclick = () => { UI.view = "register"; UI.sel = b.dataset.goreg; UI.status = ""; UI.cat = "All"; render(); }));
+  $("#self-clear").onclick = () => {
+    if (!(S.selfChecks || []).length) return toast("Nothing to remove");
+    if (!confirm(`Remove all ${S.selfChecks.length} imported self-check sheet(s)?`)) return;
+    S.selfChecks = []; S.audit.push({ at: new Date().toISOString(), ...user(), action: "SELFCHECK_REMOVE", detail: "all sheets" }); save(); render();
   };
 }
 
@@ -1439,15 +1812,20 @@ async function unzip(buf) {
   }
   return files;
 }
-async function readXlsx(buf) {
+async function readXlsx(buf, opts = {}) {
   const z = await unzip(buf), td = new TextDecoder(), xml = async (n) => z[n] ? new DOMParser().parseFromString(td.decode(await z[n]()), "application/xml") : null;
   const ss = await xml("xl/sharedStrings.xml");
   const strings = ss ? [...ss.getElementsByTagName("si")].map((si) => [...si.getElementsByTagName("t")].map((t) => t.textContent).join("")) : [];
   const wb = await xml("xl/workbook.xml"), rels = await xml("xl/_rels/workbook.xml.rels");
-  const first = wb.getElementsByTagName("sheet")[0], rid = first.getAttribute("r:id") || first.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id");
+  const sheetEls = [...wb.getElementsByTagName("sheet")];
+  const pick = typeof opts.sheet === "number" ? sheetEls[opts.sheet]
+    : typeof opts.sheet === "function" ? sheetEls.find((s) => opts.sheet(s.getAttribute("name") || "")) : sheetEls[0];
+  if (!pick) throw new Error(opts.sheetError || "Worksheet not found in this workbook");
+  const rid = pick.getAttribute("r:id") || pick.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id");
   let target = [...rels.getElementsByTagName("Relationship")].find((r) => r.getAttribute("Id") === rid).getAttribute("Target");
   target = target.startsWith("/") ? target.slice(1) : "xl/" + target.replace(/^\.\//, "");
   const sh = await xml(target), rows = [];
+  rows.sheetNames = sheetEls.map((s) => s.getAttribute("name") || "");
   for (const row of sh.getElementsByTagName("row")) {
     const arr = [];
     for (const c of row.getElementsByTagName("c")) {
@@ -1484,6 +1862,66 @@ function normalizeGcats(rows) {
   out.layout = layout;
   return out;
 }
+// ---------------- Supplier Self-Check Form ----------------
+/** Read the "IMDS Information Form" sheet plus the contact people.
+ *  Columns are taken from the sheet's own header row, so a re-ordered template still works. */
+const SELF_FIELDS = [
+  ["no", "NO."], ["supplierCode", "SUPPLIER CODE"], ["companyName", "COMPANY NAME"], ["partNo", "PART NUMBER"],
+  ["partName", "PART NAME"], ["eciNo", "LATEST ECI NO."], ["idVersion", "ID/VERSION"], ["submissionDate", "SUBMISSION DATE"],
+  ["massA", "(A) MASS"], ["massB", "(B) TOTAL MASS"], ["massDev", "MASS DEVIATION"], ["drawingMass", "DRAWING MASS"],
+  ["actualMass", "ACTUAL MASS"], ["massClass", "MASS TOLERANCE CLASS"], ["materialName", "MATERIAL NAME"],
+  ["materialContent", "SUBSTANCE CONTENT (% WT)"], ["materialRemarks", "SUPPLIER REMARKS"], ["applicationId", "CORRECT APPLICATION ID"],
+  ["substanceName", "SUBSTANCE NAME"], ["cas", "CAS NO."], ["substanceContent", "SUBSTANCE CONTENT (%)"],
+  ["purpose", "PURPOSE OF USE"], ["explanation", "SUPPLIER REMARKS / EXPLANATION"],
+];
+const upper = (s) => String(s ?? "").replace(/\s+/g, " ").trim().toUpperCase();
+function parseSelfCheckForm(rows) {
+  const h = rows.findIndex((r, i) => i < 20 && r && r.some((c) => upper(c) === "SUPPLIER CODE") && r.some((c) => upper(c) === "PART NUMBER"));
+  if (h < 0) throw new Error('Sheet has no header row with "SUPPLIER CODE" and "PART NUMBER" — is this the IMDS Information Form?');
+  const cols = rows[h].map(upper);
+  const idx = {};
+  for (const [field, label] of SELF_FIELDS) {
+    let i = cols.indexOf(label);
+    if (i < 0) i = cols.findIndex((c) => c && c.startsWith(label));
+    idx[field] = i;
+  }
+  const val = (r, i) => { if (i == null || i < 0) return null; const s = r[i] == null ? "" : String(r[i]).trim(); return s === "" || s === "***" ? null : s; };
+  const out = [];
+  for (const r of rows.slice(h + 1)) {
+    if (!r) continue;
+    const rec = {};
+    for (const [field] of SELF_FIELDS) rec[field] = val(r, idx[field]);
+    // skip the template's worked example and empty numbering rows
+    if (/EXAMPLE/i.test([rec.supplierCode, rec.companyName, rec.partName].join(" "))) continue;
+    if (!rec.supplierCode && !rec.partNo && !rec.companyName) continue;
+    if (!rec.partNo && !rec.supplierCode) continue;
+    rec.partKeyNorm = String(rec.partNo || "").replace(/[^0-9a-z]/gi, "").toUpperCase();
+    out.push(rec);
+  }
+  return out;
+}
+function parseContacts(rows) {
+  const h = rows.findIndex((r, i) => i < 20 && r && r.some((c) => upper(c) === "ROLE") && r.some((c) => upper(c) === "NAME"));
+  if (h < 0) return [];
+  const cols = rows[h].map(upper), ci = (n) => cols.indexOf(n);
+  const v = (r, i) => (i < 0 || r[i] == null ? null : String(r[i]).trim() || null);
+  return rows.slice(h + 1).map((r) => r && ({ role: v(r, ci("ROLE")), name: v(r, ci("NAME")), division: v(r, ci("DIVISION")), email: v(r, ci("EMAIL")), phone: v(r, ci("PHONE/WA")) }))
+    .filter((c) => c && (c.name || c.email || c.phone));
+}
+/** All self-check lines for one delivery part number. */
+function selfChecksForPart(partNo) {
+  const key = String(partNo || "").replace(/[^0-9a-z]/gi, "").toUpperCase();
+  if (!key) return [];
+  const out = [];
+  for (const sub of S.selfChecks || []) for (const r of sub.rows) if (r.partKeyNorm === key) out.push({ ...r, _sub: sub });
+  return out;
+}
+function selfCheckRows() {
+  const out = [];
+  for (const sub of S.selfChecks || []) for (const r of sub.rows) out.push({ ...r, _sub: sub });
+  return out;
+}
+
 let PENDING = null;
 function viewImport() {
   $("#main").innerHTML = header("WORK / SOURCE REFRESH", "Daily G-CATS Update", "Bring in the newest Error Check Log; answers and approvals already given are kept (matched by module, version, error type, component, material and CAS).") + `
@@ -1522,13 +1960,13 @@ function viewImport() {
     if (PENDING.layout) S.layout = PENDING.layout;
     S.imports.push({ at: new Date().toISOString(), file: PENDING.file, rows: PENDING.recs.length, added, cls: PENDING.cls });
     S.audit.push({ at: new Date().toISOString(), ...user(), action: "IMPORT", detail: `${PENDING.file}: ${PENDING.recs.length} rows, ${added} new` });
-    PENDING = null; evaluateAll(); save(); UI.view = "register"; toast(`${added} new records imported`); render();
+    PENDING = null; evaluateAndAutoJudge(); save(); UI.view = "register"; toast(`${added} new records imported`); render();
   };
   $("#file").onchange = (e) => e.target.files[0] && handle(e.target.files[0]);
   const d = $("#drop"); d.ondragover = (e) => { e.preventDefault(); d.classList.add("over"); }; d.ondragleave = () => d.classList.remove("over");
   d.ondrop = (e) => { e.preventDefault(); d.classList.remove("over"); e.dataTransfer.files[0] && handle(e.dataTransfer.files[0]); };
   $("#sample").onclick = () => { PENDING = { file: "TMMIN_GCATS_Error_Log_July24 (sample)", recs: SAMPLE.records, layout: SAMPLE.layout, cls: "PROTECTED" }; commit(); };
-  $("#clear").onclick = () => { if (!confirmClear()) return; S = { records: [], answers: {}, partAnswers: {}, approvals: {}, audit: [], imports: [] }; save(); evaluateAll(); render(); };
+  $("#clear").onclick = () => { if (!confirmClear()) return; S = { records: [], answers: {}, partAnswers: {}, approvals: {}, audit: [], imports: [], flags: {}, settings: S.settings, selfChecks: [] }; save(); evaluateAll(); render(); };
 }
 function confirmClear() { const b = $("#clear"); if (b.dataset.armed) return true; b.dataset.armed = "1"; b.textContent = "Click again to delete all local data"; return false; }
 
@@ -1816,7 +2254,7 @@ function exportPdf() {
 
 document.querySelectorAll(".nav").forEach((b) => (b.onclick = () => { UI.view = b.dataset.v; UI.sel = null; render(); }));
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && UI.view === "register" && UI.sel && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { UI.sel = null; render(); } });
-evaluateAll(); render();
+evaluateAndAutoJudge(); render();
 </script>
 </body>
 </html>
