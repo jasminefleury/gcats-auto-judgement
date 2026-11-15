@@ -63,7 +63,27 @@ Open `public/index.html` in a browser. That is all — there is no build step.
    result on its own data is split back out.
 5. Set your role to **Approver** to confirm a final OK/NG. A comment is always required; overriding
    the engine, or deciding a case it could not judge, also requires a written justification.
-6. Export: **Excel (Error Log format)** with the judged rows filled in, a **PDF summary**, or **CSV**.
+6. Export:
+   - **Excel (Error Log format)** — three sheets: the G-CATS layout ready to upload back, the judgement
+     summary, and a "How to read" legend.
+   - **Summary report (Excel)** — the judgement summary on its own, in the G-CATS Error Check Log
+     column layout plus the full judgement record: engine procedure, OK/NG, the record-of-changing-to-OK
+     comment, any override justification, who decided, their role and when. Status is a solid fill:
+     green OK, red NG, amber needs input, violet human review.
+   - **Printable summary** (PDF via your browser) and **CSV**.
+
+### Destination codes
+
+The reviewer picks the TMMIN destination code (No code, A, B, C …). The judgement rules are written
+against seven regulatory regions, so each code carries the region used for Appendix 3 and the Pb
+TOYOTA policy table — the mapping is listed in **Judgement Rules** and in the summary workbook.
+Region meanings come from the Pb table's own note: EU = Europe, Israel, Turkey · KR = Korea ·
+CN = China · TW = Taiwan · IN = India · JP = Japan · OTH = everywhere else.
+
+Codes that cover more than one region are split so the reviewer states which applies: *No code*
+becomes Japan or General Export, *X* becomes Russia or India, and *V* becomes Israel or the other
+Middle and Near East countries. Korea has no code in the TMMIN chart but is offered because the
+rules treat it separately.
 
 Each row is matched by module ID, version, error type, component, material and CAS — never by the
 daily "No." — so tomorrow's import refreshes the register without losing your work.

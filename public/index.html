@@ -245,6 +245,45 @@ button.pill:hover{background:var(--violet-bg);color:var(--violet)}
 // Flows are plain JSON-serializable data so they can live in the database and be
 // edited/versioned from the Workflow Configuration screen without a rebuild.
 const DESTINATIONS = ["EU", "KR", "CN", "TW", "IN", "JP", "OTH"];
+/** TMMIN destination codes -> the regulatory region the rules are written against.
+ *  [code, country/area shown to the reviewer, region used for Appendix 3 and the Pb policy table]
+ *  Codes that cover more than one region are split so the reviewer states which one applies. */
+const DEST_CODES = [
+    ["JP", "No code — Japan", "JP"],
+    ["GEXP", "No code — General Export", "OTH"],
+    ["A", "A — US", "OTH"],
+    ["B", "B — Turkey", "EU"],
+    ["C", "C — China", "CN"],
+    ["D", "D — Indonesia", "OTH"],
+    ["E", "E — Malaysia", "OTH"],
+    ["F", "F — Venezuela", "OTH"],
+    ["G", "G — Brazil", "OTH"],
+    ["H", "H — Argentina", "OTH"],
+    ["J", "J — Kenya", "OTH"],
+    ["L", "L — Columbia", "OTH"],
+    ["M", "M — Philippines", "OTH"],
+    ["N", "N — South Africa", "OTH"],
+    ["P", "P — Pakistan", "OTH"],
+    ["Q", "Q — Australia", "OTH"],
+    ["R", "R — Taiwan", "TW"],
+    ["T", "T — Thailand", "OTH"],
+    ["U", "U — Vietnam", "OTH"],
+    ["V_IL", "V — Middle and Near East (Israel)", "EU"],
+    ["V", "V — Middle and Near East (other countries)", "OTH"],
+    ["W", "W — Europe", "EU"],
+    ["X_RU", "X — Russia", "OTH"],
+    ["X_IN", "X — India", "IN"],
+    ["Z", "Z — New Zealand", "OTH"],
+    ["KR", "Korea (no destination code in the chart)", "KR"],
+];
+const DEST_REGION = Object.fromEntries(DEST_CODES.map(([code, , region]) => [code, region]));
+const DEST_LABEL = Object.fromEntries(DEST_CODES.map(([code, label]) => [code, label]));
+/** Accepts a destination code, or one of the seven regions for answers saved before the
+ *  code list existed, and always returns the region the rules use. */
+function destRegion(answer) {
+    if (answer == null) return undefined;
+    return DEST_REGION[answer] ?? (DESTINATIONS.includes(answer) ? answer : undefined);
+}
 
 // ---- refs.ts ----
 class References {
@@ -403,7 +442,7 @@ const CHECKS = {
     },
     /** Appendix 3/4/5 evidence for the chosen destination; decision stays with the reviewer. */
     tszReference: ({ rec, refs, answers, chain }) => {
-        const dest = answers["destination"];
+        const dest = destRegion(answers["destination"]);
         if (!dest)
             return { missing: ["Vehicle destination"], detail: "Destination not answered" };
         if (rec.contentPct == null)
@@ -475,7 +514,7 @@ const CHECKS = {
     pbPolicy: ({ rec, refs, answers, judgementDate }) => {
         if (!rec.applicationId)
             return { missing: ["Application ID"], detail: "Application ID not available" };
-        const dest = answers["destination"];
+        const dest = destRegion(answers["destination"]);
         if (!dest)
             return { missing: ["Vehicle destination"], detail: "Destination not answered" };
         const id = parseInt(rec.applicationId, 10);
@@ -572,7 +611,7 @@ const NG = (id, comment) => ({ id, type: "outcome", judge: "NG", comment });
 const ESC = (id, comment = "Contact to TMC/TMNA/TME/TDEM") => ({ id, type: "outcome", judge: "ESCALATE", comment });
 const auto = (id, label, check, params, branches) => ({ id, type: "auto", label, check, params, branches });
 const ask = (id, label, key, askWho, question, options) => ({ id, type: "ask", label, key, askWho, question, options: options.map(([value, lbl, next]) => ({ value, label: lbl, next })) });
-const destination = (id, eu, other) => scoped(ask(id, "Confirm vehicle destination (Manual 2)", "destination", "reviewer", "Vehicle destination?", DESTINATIONS.map((d) => [d, d, d === "EU" ? eu : other])), PART);
+const destination = (id, eu, other) => scoped(ask(id, "Confirm vehicle destination (Manual 2)", "destination", "reviewer", "Vehicle destination code?", DEST_CODES.map(([code, label, region]) => [code, label, region === "EU" ? eu : other])), PART);
 const supplierAB = (id, label = "Confirm to Supplier") => scoped(ask(id, label, `supplier:${id}`, "supplier", "A. Input mistake / B. It contains", [["A", "A. Input mistake", `${id}_A`], ["B", "B. It contains", `${id}_B`]]), ISSUE);
 const scoped = (n, groupBy) => ({ ...n, groupBy });
 const PART = ["supplierCode", "deliveryPartNo"];
@@ -919,7 +958,15 @@ class JudgementEngine {
             }
             else if (node.type === "ask") {
                 const a = answers[node.key];
-                const opt = node.options.find((o) => o.value === a);
+                let opt = node.options.find((o) => o.value === a);
+                if (!opt && node.key === "destination" && a != null) {
+                    // An answer saved before the destination-code list existed was stored as the
+                    // region itself ("EU", "OTH", ...). Route it by region, but keep the answer as
+                    // it was actually given so the evidence trail stays truthful.
+                    const reg = destRegion(a);
+                    const match = reg && node.options.find((o) => destRegion(o.value) === reg);
+                    if (match) opt = { value: a, label: `${a} (answered before destination codes were added)`, next: match.next };
+                }
                 if (!opt) {
                     base.trace.push({ nodeId, label: node.label, kind: "ask", status: "pending", detail: node.question });
                     const route = node.askWho === "supplier" ? "Supplier" : node.askWho === "purchasing" ? "Purchasing" : "Internal";
@@ -1014,7 +1061,7 @@ function approve(ev, by, decision, comment, justification, groupRepresentative) 
         referenceVersions: ev.referenceVersions, groupRepresentative };
 }
 
-return { References, JudgementEngine, evaluateImport, recordKey, partKey, PART_LEVEL_KEYS, groupIdentical, applyGroupAnswer, approve, FLOWS, ERROR_TYPES, DESTINATIONS };
+return { References, JudgementEngine, evaluateImport, recordKey, partKey, PART_LEVEL_KEYS, groupIdentical, applyGroupAnswer, approve, FLOWS, ERROR_TYPES, DESTINATIONS, DEST_CODES, DEST_REGION, DEST_LABEL, destRegion };
 })();</script>
 <script>
 "use strict";
@@ -1202,7 +1249,8 @@ function viewRegister() {
       <select id="f-status"><option value="">All statuses</option>${["AWAITING_INPUT", "RECOMMEND_OK", "RECOMMEND_NG", "NEED_HUMAN_REVIEW", "FINAL"].map((s) => `<option value="${s}" ${UI.status === s ? "selected" : ""}>${STATUS_LABEL[s]}</option>`).join("")}</select>
       <select id="f-route"><option value="">All routes</option>${["Supplier", "Purchasing", "Internal", "Approval", "Escalation (TMC/TMNA/TME/TDEM)"].map((s) => `<option ${UI.route === s ? "selected" : ""}>${s}</option>`).join("")}</select>
       <button class="btn pri" id="xl">⬇ Excel (Error Log format)</button>
-      <button class="btn" id="pdf">⬇ Summary report</button>
+      <button class="btn" id="sum">⬇ Summary report (Excel)</button>
+      <button class="btn" id="pdf">⬇ Printable summary</button>
       <button class="btn" id="export">CSV</button>
     </div>
     <div class="chips">${["All", ...Object.keys(cats).sort()].map((c) => `<button class="chip ${UI.cat === c ? "on" : ""}" data-cat="${esc(c)}">${esc(c)}<i>${c === "All" ? ITEMS.length : cats[c]}</i></button>`).join("")}</div>
@@ -1228,6 +1276,7 @@ function viewRegister() {
   $("#export").onclick = exportCsv;
   document.querySelectorAll("[data-st]").forEach((b) => (b.onclick = () => { UI.status = b.dataset.st; render(); }));
   $("#xl").onclick = () => exportXlsx().catch((e) => toast("Excel export failed: " + e.message));
+  $("#sum").onclick = () => exportSummaryXlsx().catch((e) => toast("Summary export failed: " + e.message));
   $("#pdf").onclick = exportPdf;
   document.querySelectorAll("[data-cat]").forEach((b) => (b.onclick = () => { UI.cat = b.dataset.cat; render(); }));
   document.querySelectorAll("tr.row").forEach((tr) => (tr.onclick = () => { UI.sel = tr.dataset.k; UI.decision = null; render(); }));
@@ -1365,6 +1414,12 @@ function viewRules() {
   const F = IMDS.FLOWS;
   $("#main").innerHTML = header("REFERENCE / RULES", "Judgement Rules", "Appendix I error types and Appendix II flows as executable decision graphs. DRAFT flows only suggest — they always end in human review.") +
   `<div class="card"><table><thead><tr><th>No.</th><th>Error type</th><th>Flow</th></tr></thead><tbody>${IMDS.ERROR_TYPES.map((t) => `<tr><td>${t.no}</td><td>${esc(t.name)}<div class="small">${esc(t.aliases.join(", "))}</div></td><td class="mono">${esc(t.flow || "chosen by CAS → TSZ0001G")}</td></tr>`).join("")}</tbody></table></div>
+  <div class="card" style="margin-top:14px"><h3>Destination codes</h3>
+    <p class="hint">The reviewer picks the TMMIN destination code. The rules are written against seven regulatory regions, so each code carries the region used for Appendix 3 and the Pb TOYOTA policy table. Region meanings are the Pb table's own note: EU = Europe, Israel, Turkey · KR = Korea · CN = China · TW = Taiwan · IN = India · JP = Japan · OTH = everywhere else.</p>
+    <table><thead><tr><th>Destination code</th><th>Region used by the rules</th></tr></thead><tbody>
+    ${IMDS.DEST_CODES.map(([code, label, region]) => `<tr><td>${esc(label)}</td><td><span class="tag ${region === "OTH" ? "t-route" : "t-rev"}">${esc(region)}</span></td></tr>`).join("")}
+    </tbody></table>
+    <p class="small" style="margin-top:10px">Codes covering more than one region are split so the reviewer states which applies. Korea has no code in the TMMIN chart but is listed because the Pb policy table and Appendix 3 treat it separately.</p></div>
   <div style="margin-top:14px">${Object.values(F).map((f) => `<details class="card" style="margin-bottom:8px"><summary><b class="mono">${esc(f.id)}</b> ${esc(f.title)} <span class="tag ${f.status === "ACTIVE" ? "t-ok" : "t-wait"}">${f.status}</span> <span class="small">v${esc(f.version)}</span></summary>
     <div class="small" style="margin:6px 0">${esc(f.source)}</div><ul class="steps">${Object.values(f.nodes).map((n) => `<li><span class="ic ${n.type === "outcome" ? "out" : n.type === "ask" ? "pending" : "done"}">${n.type === "outcome" ? "■" : ""}</span><div><b>${esc(n.type === "outcome" ? n.judge + ": " + n.comment : n.label)}</b><div>${n.type === "auto" ? "auto · " + esc(n.check) + " → " + esc(Object.entries(n.branches).map(([k, v]) => k + "→" + v).join(", ")) : n.type === "ask" ? "asks " + esc(n.askWho) + " · " + esc(n.options.map((o) => o.label + "→" + o.next).join(", ")) : esc(n.note || "")}</div></div></li>`).join("")}</ul></details>`).join("")}</div>`;
 }
@@ -1532,11 +1587,11 @@ function sheetXml(rows, opts) {
 }
 const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <numFmts count="2"><numFmt numFmtId="164" formatCode="yyyy/mm/dd"/><numFmt numFmtId="165" formatCode="yyyy/mm/dd hh:mm"/></numFmts>
-<fonts count="3"><font><sz val="10"/><name val="Arial"/></font><font><b/><sz val="10"/><name val="Arial"/></font><font><b/><sz val="14"/><name val="Arial"/></font></fonts>
-<fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFCCC0E6"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/></patternFill></fill></fills>
+<fonts count="5"><font><sz val="10"/><name val="Arial"/></font><font><b/><sz val="10"/><name val="Arial"/></font><font><b/><sz val="14"/><name val="Arial"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Arial"/></font><font><b/><sz val="14"/><color rgb="FFFFFFFF"/><name val="Arial"/></font></fonts>
+<fills count="11"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFCCC0E6"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F9D76"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE0405F"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF5A524"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF5B30D6"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF4524AD"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFDFF7FB"/></patternFill></fill></fills>
 <borders count="2"><border/><border><left style="thin"><color rgb="FF999999"/></left><right style="thin"><color rgb="FF999999"/></right><top style="thin"><color rgb="FF999999"/></top><bottom style="thin"><color rgb="FF999999"/></bottom></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="11">
+<cellXfs count="19">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
 <xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
@@ -1548,6 +1603,14 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleShe
 <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
 <xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>
 <xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>
+<xf numFmtId="0" fontId="3" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="3" fillId="6" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="3" fillId="7" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="3" fillId="8" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="3" fillId="9" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="0" fillId="10" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="4" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>
+<xf numFmtId="0" fontId="4" fillId="9" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center"/></xf>
 </cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
 
 async function zipFiles(files) {
@@ -1616,30 +1679,110 @@ function errorLogRows() {
   const widths = headers.map((h) => (h === "Judgment procedure" ? 60 : h.startsWith("Comment of") || h === "IMDS Reject comment" || h === "KM Comment" ? 36 : /Name/.test(h) ? 26 : h === "Substance Name" ? 28 : 12));
   return { rows: [...head, ...body], widths, freeze: layout.headerRows.length, filter: `A${layout.headerRows.length}:${colName(ncols - 1)}${layout.headerRows.length + body.length}` };
 }
-function summaryRows() {
-  const H = ["Part No", "Supplier Code", "Company", "Error Type", "CAS", "Substance", "Material", "Content wt%", "Destination", "Mass class", "Engine status", "Engine recommendation", "Engine comment", "Next step", "Route", "Final judge", "Final comment", "Override justification", "Decided by", "Decided at", "Flow", "Reference versions"];
-  const rows = [[{ v: "IMDS Auto-Judgement — summary " + today, s: 5 }], H.map((v) => ({ v, s: 1 }))];
-  for (const it of ITEMS) {
-    const r = it.record, e = it.evaluation, f = finalOf(it), a = answersFor(r);
-    rows.push([r.deliveryPartNo, r.supplierCode, r.companyName, e.errorCategory, r.cas, r.substanceName, r.materialName, r.contentPct, a.destination, a.massClass, f ? f.newStatus : e.status, e.recommendedJudge, e.comment,
-      f ? "" : e.pendingQuestion ? e.pendingQuestion.question : e.reasons.join("; "), f ? "Done" : e.routeTo, f ? (f.newStatus === "FINAL_OK" ? "OK" : "NG") : "", f ? f.comment : "", f ? f.justification : "", f ? f.user : "", f ? f.at.replace("T", " ").slice(0, 16) : "",
-      `${e.flowId || ""} ${e.flowVersion || ""}`, Object.values(e.referenceVersions).join(" | ")].map((v) => ({ v: v ?? "", t: typeof v === "number" ? "n" : "s", s: f ? 4 : 3 })));
-  }
-  return { rows, widths: [14, 9, 24, 22, 13, 24, 18, 9, 9, 8, 18, 10, 30, 40, 14, 8, 30, 24, 14, 16, 16, 40], freeze: 2, filter: `A2:V${rows.length}` };
+/** Judgement summary: the G-CATS Error Check Log columns, every judged row filled in,
+ *  followed by the judgement record itself (who, when, procedure, comment, justification).
+ *  Status is carried by a solid fill so the sheet reads at a glance. */
+const S_OK = 11, S_NG = 12, S_WAIT = 13, S_REVIEW = 14, S_HEAD = 15, S_CHAIN = 16, S_TITLE = 18;
+function statusFill(it) {
+  const f = finalOf(it);
+  if (f) return f.newStatus === "FINAL_OK" ? S_OK : S_NG;
+  return { RECOMMEND_OK: S_OK, RECOMMEND_NG: S_NG, AWAITING_INPUT: S_WAIT, NEED_HUMAN_REVIEW: S_REVIEW }[it.evaluation.status] || S_WAIT;
 }
+function statusWord(it) {
+  const f = finalOf(it);
+  if (f) return f.newStatus === "FINAL_OK" ? "FINAL OK" : "FINAL NG";
+  return { RECOMMEND_OK: "Recommend OK", RECOMMEND_NG: "Recommend NG", AWAITING_INPUT: "Needs input", NEED_HUMAN_REVIEW: "Human review" }[it.evaluation.status] || "";
+}
+function summaryRows() {
+  const layout = S.layout || { headerRows: [["G-CATS Error Check Log"], ["Business Entity:", "", "TMMIN"], DEFAULT_HEADERS.map((_, i) => String(i + 1)), DEFAULT_HEADERS], ncols: DEFAULT_HEADERS.length };
+  const srcHeaders = layout.headerRows[layout.headerRows.length - 1].map(hnorm);
+  const ncols = Math.max(layout.ncols, srcHeaders.length);
+  // the Error Check Log columns, then the judgement record
+  const EXTRA = ["Status", "Engine recommendation", "Destination code", "Destination (rule region)", "Mass tolerance class",
+                 "Judgment procedure (engine)", "Judge (OK/NG)", "Record of changing to OK / comment", "Override justification",
+                 "Decided by", "Role", "Decided at", "Next step / route", "Flow", "Reference versions"];
+  const judged = ITEMS.filter((i) => finalOf(i)).length;
+  const title = [{ v: `G-CATS Auto-Judgement — judgement summary · ${today} · ${ITEMS.length} records · ${judged} final`, s: S_TITLE }];
+  const head = [...srcHeaders.map((h) => ({ v: h, s: 1 })), ...EXTRA.map((h) => ({ v: h, s: S_HEAD }))];
+  const body = ITEMS.slice().sort((a, b) => (a.record.downloadDate || "").localeCompare(b.record.downloadDate || "") || a.record.rowNo - b.record.rowNo).map((it) => {
+    const r = it.record, e = it.evaluation, f = finalOf(it), a = answersFor(r), fill = statusFill(it);
+    const src = Array.from({ length: ncols }, (_, i) => {
+      const h = srcHeaders[i];
+      let v = r.raw ? r.raw[i] ?? "" : (FIELD_OF[h] != null ? r[FIELD_OF[h]] ?? "" : "");
+      const isNum = NUMERIC_COLS.has(h) && v !== "" && !isNaN(+String(v).replace(/,/g, ""));
+      if (DATE_COLS.has(h) && /^\d+(\.\d+)?$/.test(String(v))) return { v: +v, t: "n", s: +v % 1 ? 10 : 9 };
+      return { v: isNum ? +String(v).replace(/,/g, "") : v, t: isNum ? "n" : "s", s: 3 };
+    });
+    const destCode = a.destination || "";
+    const rec = [
+      { v: statusWord(it), s: fill },
+      { v: e.recommendedJudge || "", s: 3 },
+      { v: destCode, s: 3 },
+      { v: destCode ? (IMDS.destRegion(destCode) || "") : "", s: 3 },
+      { v: a.massClass || "", s: 3 },
+      { v: procedureText(f ? (f.evaluationSnapshot || e) : e), s: S_CHAIN },
+      { v: f ? (f.newStatus === "FINAL_OK" ? "OK" : "NG") : "", s: fill },
+      { v: f ? f.comment || "" : "", s: 3 },
+      { v: f ? f.justification || "" : "", s: 3 },
+      { v: f ? f.user : "", s: 3 },
+      { v: f ? f.role : "", s: 3 },
+      { v: f ? f.at.replace("T", " ").slice(0, 16) : "", s: 3 },
+      { v: f ? "Done" : (e.pendingQuestion ? e.pendingQuestion.question : (e.reasons || []).join("; ")) + (e.routeTo ? ` [${e.routeTo}]` : ""), s: 3 },
+      { v: `${e.flowId || ""} ${e.flowVersion || ""}`.trim(), s: 3 },
+      { v: Object.entries(e.referenceVersions || {}).map(([k, v]) => `${k}: ${v}`).join(" | "), s: 3 },
+    ];
+    return [...src, ...rec];
+  });
+  const widths = [...srcHeaders.map((h) => (/Name/.test(h) ? 26 : h === "Substance Name" ? 28 : 12)),
+                  14, 12, 14, 14, 10, 70, 10, 42, 36, 16, 16, 18, 46, 14, 60];
+  return { rows: [title, head, ...body], widths, freeze: 2, filter: `A2:${colName(head.length - 1)}${body.length + 2}` };
+}
+function summaryLegendRows() {
+  const L = [["FINAL OK / Recommend OK", S_OK], ["FINAL NG / Recommend NG", S_NG], ["Needs input", S_WAIT], ["Human review", S_REVIEW]];
+  const rows = [[{ v: "How to read this workbook", s: S_TITLE }], [],
+    [{ v: "Sheet", s: 1 }, { v: "What it holds", s: 1 }],
+    [{ v: "Error Check Log", s: 3 }, { v: "The G-CATS layout, ready to upload back; judged rows filled in the judgement columns.", s: 3 }],
+    [{ v: "Judgement summary", s: 3 }, { v: "The same columns plus the full judgement record: engine procedure, comment, justification, who decided and when.", s: 3 }],
+    [], [{ v: "Status colour", s: 1 }, { v: "Meaning", s: 1 }],
+    ...L.map(([lbl, s]) => [{ v: lbl, s }, { v: lbl.includes("OK") ? "Engine recommends OK, or an Approver confirmed OK." : lbl.includes("NG") ? "Engine recommends NG, or an Approver confirmed NG." : lbl === "Needs input" ? "Waiting on an answer from a reviewer, Purchasing or the supplier." : "The engine could not decide — data missing or conflicting.", s: 3 }]),
+    [], [{ v: "Destination codes", s: 1 }, { v: "Rule region used", s: 1 }],
+    ...IMDS.DEST_CODES.map(([code, label, region]) => [{ v: label, s: 3 }, { v: region, s: 3 }]),
+    [], [{ v: "Engine recommendations are not final Toyota decisions until confirmed by an Approver.", s: 8 }],
+  ];
+  return { rows, widths: [46, 96] };
+}
+/** Build an .xlsx from any number of named sheets. */
+async function workbook(sheets) {
+  const n = sheets.length;
+  const over = sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("");
+  const tabs = sheets.map((s, i) => `<sheet name="${xmlEsc(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("");
+  const rels = sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")
+    + `<Relationship Id="rId${n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`;
+  const files = {
+    "[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${over}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+    "_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    "xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${tabs}</sheets></workbook>`,
+    "xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`,
+    "xl/styles.xml": STYLES,
+  };
+  sheets.forEach((s, i) => { files[`xl/worksheets/sheet${i + 1}.xml`] = sheetXml(s.rows, s); });
+  return zipFiles(files);
+}
+
+/** The judgement summary on its own: the G-CATS columns plus the full judgement record. */
+async function exportSummaryXlsx() {
+  if (!ITEMS.length) return toast("Nothing to export — import a G-CATS log first");
+  const b = summaryRows(), l = summaryLegendRows();
+  const blob = await workbook([{ name: "Judgement summary", ...b }, { name: "How to read", ...l }]);
+  await saveFile(`TMMIN_GCATS_judgement_summary_${today}.xlsx`, blob, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  S.audit.push({ at: new Date().toISOString(), ...user(), action: "EXPORT", detail: `Judgement summary (Excel): ${ITEMS.filter((i) => finalOf(i)).length} final of ${ITEMS.length}` }); save();
+  toast("Judgement summary downloaded — every comment and decision is in it");
+}
+
 async function exportXlsx() {
   if (!ITEMS.length) return toast("Nothing to export — import a G-CATS log first");
-  const a = errorLogRows(), b = summaryRows();
-  const files = {
-    "[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
-    "_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
-    "xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Judgement summary" sheetId="2" r:id="rId2"/></sheets></workbook>`,
-    "xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
-    "xl/styles.xml": STYLES,
-    "xl/worksheets/sheet1.xml": sheetXml(a.rows, a),
-    "xl/worksheets/sheet2.xml": sheetXml(b.rows, b),
-  };
-  const blob = await zipFiles(files);
+  const a = errorLogRows(), b = summaryRows(), l = summaryLegendRows();
+  const blob = await workbook([{ name: "Error Check Log", ...a }, { name: "Judgement summary", ...b }, { name: "How to read", ...l }]);
   await saveFile(`TMMIN_GCATS_Error_Log_judged_${today}.xlsx`, blob, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   S.audit.push({ at: new Date().toISOString(), ...user(), action: "EXPORT", detail: `Excel (Error Log format): ${ITEMS.filter((i) => finalOf(i)).length} judged of ${ITEMS.length}` }); save();
   toast("Excel downloaded — judged rows are filled in columns Assigned person … Last Change Date (yellow)");
