@@ -13,7 +13,7 @@ Runs entirely in the browser — the G-CATS data never leaves the machine it is 
 
 | Screen | What it is for |
 | --- | --- |
-| **Overview** | Progress, what needs attention first, workload by route, suppliers with the most open cases |
+| **Overview** | Judgement pipeline donut, completion, error types, who you are waiting on, what needs attention next |
 | **Judgement Register** | Every case, with the evidence chain and the decision panel |
 | **Daily G-CATS Update** | Import today's Error Check Log; answers and decisions already made are kept |
 | **Auto-Judgement History** | Append-only log of every answer, approval, override and re-open |
@@ -21,7 +21,22 @@ Runs entirely in the browser — the G-CATS data never leaves the machine it is 
 | **Substance References** | CAS lookup: GADSL → TSZ0001G group → POPs / REACH XVII / REACH XIV |
 | **Judgement Rules** | The Appendix II flows the engine follows |
 
-Light and dark mode, and it follows your system setting until you pick one.
+### Light and dark mode
+
+The toggle sits in the page header, next to your role. The app follows your system setting on first
+visit, then remembers whatever you pick. Green still means OK and red still means NG in both themes;
+the interface accents are cyan and violet so they never compete with a judgement colour.
+
+### Typefaces
+
+Urbanist and JetBrains Mono, loaded from Google Fonts. If your IT blocks that, the app falls back to
+system fonts and keeps working — but to self-host instead:
+
+1. Download both families (fonts.google.com) and put the `.woff2` files in `public/fonts/`.
+2. In `public/index.html`, delete the two `fonts.googleapis.com` `<link>` tags and add matching
+   `@font-face` rules at the top of the `<style>` block.
+3. In `vercel.json`, drop `https://fonts.googleapis.com` and `https://fonts.gstatic.com` from the
+   Content-Security-Policy header.
 
 ## Deploy on Vercel
 
@@ -71,7 +86,6 @@ This reference data is Toyota PROTECTED material. Keep this repository private.
 ## Repository
 
 ```
-public/index.html    the whole app (engine, UI and reference data in one file)
-public/styles.css    theme and layout, light + dark
+public/index.html    the whole app — engine, interface, styles and reference data in one file
 vercel.json          output directory and security headers
 ```
